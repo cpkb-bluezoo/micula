@@ -1,0 +1,70 @@
+name: Publish to Maven Central
+
+# All the actual work (build, sign, bundle, upload) lives in
+# scripts/publish-to-central.sh - the single canonical implementation, also
+# runnable by hand locally for a one-off publish that doesn't need a fresh
+# GitHub Release. This workflow just supplies secrets - VERSION is left
+# unset so the script auto-detects it from pom.xml's own <version> (and
+# cross-checks it against build.xml's "release" property), the same way a
+# local run would. This works identically whether triggered by a Release
+# (tag ref) or workflow_dispatch (which would also normally be run against
+# a tag, not a branch).
+#
+# publishingType defaults to AUTOMATIC in the script (see its own
+# comments): the bundle is uploaded and goes live on Central automatically
+# once validation passes, no manual "Publish" click needed. A released
+# version can never be deleted or overwritten once public, so this relies
+# on the pipeline's version-mismatch guards and build having been proven
+# out already - set PUBLISHING_TYPE=USER_MANAGED here to fall back to
+# manual review at https://central.sonatype.com if ever needed.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Import GPG key
+        id: gpg
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT"
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      - name: Allow loopback pinentry
+        run: |
+          mkdir -p ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --reload gpg-agent
+
+      - name: Publish to Maven Central
+        run: ./scripts/publish-to-central.sh
+        env:
+          GPG_KEY_ID: ${{ steps.gpg.outputs.key_id }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          KEEP_BUNDLE_AT: ${{ github.workspace }}/central-bundle.zip
+
+      - name: Upload artifact for inspection
+        uses: actions/upload-artifact@v7
+        with:
+          name: central-bundle
+          path: central-bundle.zip
