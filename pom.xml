@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This POM declares Maven coordinates and the metadata Maven Central's
+  Publisher API validates (name/description/url/licenses/developers/scm) -
+  it performs no build or deploy action of its own. Ant (build.xml) is the
+  sole build tool for this project.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.bluezoo</groupId>
+    <artifactId>micula</artifactId>
+    <version>1.0</version>
+    <packaging>jar</packaging>
+
+    <name>Micula</name>
+    <description>Event-driven Brotli codec for Java (RFC 7932).</description>
+    <url>https://github.com/cpkb-bluezoo/micula</url>
+
+    <licenses>
+        <license>
+            <name>GNU Lesser General Public License v2.1</name>
+            <url>https://www.gnu.org/licenses/lgpl-2.1.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Chris Burdess</name>
+            <email>dog@gnu.org</email>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git://github.com/cpkb-bluezoo/micula.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com:cpkb-bluezoo/micula.git</developerConnection>
+        <url>https://github.com/cpkb-bluezoo/micula</url>
+    </scm>
+
+</project>

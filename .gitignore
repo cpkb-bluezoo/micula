@@ -1,3 +1,6 @@
+*~
+.DS_Store
+
 # Compiled class file
 *.class
 
@@ -22,3 +25,20 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Build outputs
+/build/
+/dist/
+/doc/
+/test/junit/classes/
+/test/junit/results/
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# Keep test JARs
+!test/junit/lib/*.jar
