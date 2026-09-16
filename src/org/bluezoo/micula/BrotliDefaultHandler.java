@@ -30,6 +30,12 @@ import java.nio.ByteBuffer;
  */
 public class BrotliDefaultHandler implements BrotliHandler {
 
+    /**
+     * Constructs a new default handler.
+     */
+    public BrotliDefaultHandler() {
+    }
+
     @Override
     public void setLocator(BrotliLocator locator) {
     }

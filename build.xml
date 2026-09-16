@@ -10,7 +10,7 @@
   <property name="resources" location="resources"/>
   <property name="tools" location="tools"/>
   <property name="generated" location="build/generated"/>
-  <property name="release" value="1.0"/>
+  <property name="release" value="1.0.0"/>
   <property name="java.release.version" value="21"/>
   <property name="java.source.version" value="21"/>
   <property name="java.target.version" value="21"/>
