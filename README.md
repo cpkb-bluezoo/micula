@@ -56,6 +56,10 @@ ant test
 
 Requires JDK 21+.
 
+## Documentation
+
+- [Javadoc (GitHub Pages)](https://cpkb-bluezoo.github.io/micula/doc/)
+
 ## License
 
 GNU Lesser General Public License version 2.1 (see [LICENSE](LICENSE)).

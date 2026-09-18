@@ -78,11 +78,24 @@
     </jar>
   </target>
 
-  <target name="javadoc">
+  <target name="javadoc"
+          description="Generate Javadoc API documentation">
     <mkdir dir="${doc}"/>
     <javadoc sourcepath="${src}" destdir="${doc}"
-             source="${java.source.version}"/>
+             source="${java.source.version}"
+             windowtitle="Micula API"
+             doctitle="Micula API Documentation"
+             author="true"
+             version="true"
+             use="true"/>
   </target>
+
+  <target name="clean-javadoc" description="Remove generated Javadoc">
+    <delete dir="${doc}"/>
+  </target>
+
+  <target name="javadoc-force" depends="clean-javadoc,javadoc"
+          description="Force complete regeneration of Javadoc"/>
 
   <target name="release-javadoc" depends="javadoc">
     <mkdir dir="${dist}"/>
