@@ -399,18 +399,21 @@ public final class BrotliEncoder {
             boolean insertOnly = (cmd.distance == 0);
             boolean skipDistance = bytesEmitted >= length;
 
-            boolean implicitDist0 = false;
+            boolean preferImplicit = false;
             if (insertOnly || skipDistance) {
-                implicitDist0 = true;
+                preferImplicit = true;
             } else if (!cmd.dictionary && cmd.distance == distRing.get(0)) {
-                implicitDist0 = true;
+                preferImplicit = true;
             }
 
             int copyLen = cmd.copyLen;
             if (copyLen < 2) {
                 copyLen = 2;
             }
-            InsertCopyLengths.pack(cmd.insertLen, copyLen, implicitDist0, packOut);
+            InsertCopyLengths.pack(cmd.insertLen, copyLen, preferImplicit, packOut);
+            // Only symbols below 128 imply distance code 0; long inserts and
+            // copies have no such symbol and need the distance written out.
+            boolean implicitDist0 = packOut[0] < 128;
             iacCodes[ci] = packOut[0];
             insertExtras[ci] = packOut[1];
             copyExtras[ci] = packOut[2];
@@ -506,8 +509,8 @@ public final class BrotliEncoder {
         if (distance <= 0) {
             throw new BrotliException("Invalid distance " + distance);
         }
-        // Try short codes 1..15 (0 is last distance / implicit)
-        for (int c = 1; c < 16; c++) {
+        // Try short codes 0..15 (0 is the last distance)
+        for (int c = 0; c < 16; c++) {
             if (ring.resolveShort(c) == distance) {
                 out[0] = c;
                 out[1] = 0;
