@@ -454,8 +454,9 @@ final class PrefixCode {
             }
             return;
         }
-        if (n == 4 && lengths[syms[0]] != 2) {
-            // May be 1,2,3,3 pattern — order properly
+        if (n == 4 && (lengths[syms[0]] != 2 || lengths[syms[1]] != 2)) {
+            // 1,2,3,3 pattern (as opposed to 2,2,2,2): the symbols must be
+            // listed by ascending length, whatever their sorted position
             int s1 = -1;
             int s2 = -1;
             int s3a = -1;
@@ -576,41 +577,16 @@ final class PrefixCode {
             }
             return;
         }
+        // Balanced complete code over the n used symbols: with L = ceil(log2 n),
+        // 2^L - n symbols get length L - 1 and the rest get length L, so the
+        // Kraft sum is exactly 32 for any n (L is at most 4 for n <= 16).
         int len = 3;
-        if (n > 8) {
-            len = 4;
+        while ((1 << len) < n) {
+            len++;
         }
-        if (n > 16) {
-            len = 5;
-        }
+        int shorter = (1 << len) - n;
         for (int i = 0; i < n; i++) {
-            clLengths[usedSyms[i]] = len;
-        }
-        int kraft = n * (1 << (5 - len));
-        int filler = 0;
-        while (kraft < 32 && filler < 18) {
-            if (clLengths[filler] == 0) {
-                clLengths[filler] = 5;
-                kraft += 1;
-            }
-            filler++;
-        }
-        while (kraft > 32) {
-            boolean changed = false;
-            for (int i = 0; i < 18 && kraft > 32; i++) {
-                if (clLengths[i] > 0 && clLengths[i] < 5) {
-                    kraft -= 1 << (5 - clLengths[i]);
-                    clLengths[i]++;
-                    kraft += 1 << (5 - clLengths[i]);
-                    changed = true;
-                }
-            }
-            if (!changed) {
-                throw new BrotliException("Cannot balance code-length kraft");
-            }
-        }
-        if (kraft != 32) {
-            throw new BrotliException("Code-length kraft=" + kraft);
+            clLengths[usedSyms[i]] = (i < shorter) ? len - 1 : len;
         }
     }
 
