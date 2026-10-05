@@ -22,3 +22,6 @@ jobs:
 
       - name: Run unit tests
         run: ant clean junit-test
+
+      - name: JMH smoke (compile and short run)
+        run: ant jmh-smoke

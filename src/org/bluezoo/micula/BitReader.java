@@ -40,6 +40,19 @@ final class BitReader {
     private static final VarHandle LONG_LE =
         MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
+    /** MSB-first interpretation of {@code n} LSB-first peek bits (Huffman). */
+    private static final int[][] PREFIX_REVERSE = new int[16][];
+
+    static {
+        for (int n = 1; n <= 15; n++) {
+            int[] table = new int[1 << n];
+            for (int i = 0; i < table.length; i++) {
+                table[i] = reverseBits(i, n);
+            }
+            PREFIX_REVERSE[n] = table;
+        }
+    }
+
     /** Accumulator holding up to 64 bits, least-significant bits first. */
     private long accumulator;
 
@@ -61,6 +74,9 @@ final class BitReader {
      */
     private ByteBuffer pending;
 
+    /** Reused when {@link #pending} and a new chunk must be merged. */
+    private ByteBuffer mergeBuf;
+
     /** Checkpoint for resumable multi-field reads (e.g. prefix codes). */
     private long markAccumulator;
     private int markBitCount;
@@ -79,6 +95,7 @@ final class BitReader {
         input = null;
         eof = false;
         pending = null;
+        mergeBuf = null;
         markValid = false;
     }
 
@@ -119,12 +136,19 @@ final class BitReader {
     void setInput(ByteBuffer data) {
         if (pending != null && pending.hasRemaining()) {
             int need = pending.remaining() + data.remaining();
-            ByteBuffer combined = ByteBuffer.allocate(need);
-            combined.put(pending);
-            combined.put(data);
-            combined.flip();
+            if (mergeBuf == null || mergeBuf.capacity() < need) {
+                int cap = mergeBuf != null ? mergeBuf.capacity() * 2 : 64;
+                while (cap < need) {
+                    cap *= 2;
+                }
+                mergeBuf = ByteBuffer.allocate(cap);
+            }
+            mergeBuf.clear();
+            mergeBuf.put(pending);
+            mergeBuf.put(data);
+            mergeBuf.flip();
             data.position(data.limit());
-            input = combined;
+            input = mergeBuf;
             pending = null;
         } else {
             input = data;
@@ -268,8 +292,11 @@ final class BitReader {
      * Peeks {@code n} bits as an MSB-first prefix-code value (for Huffman lookup).
      */
     int peekPrefixBits(int n) {
+        if (n == 0) {
+            return 0;
+        }
         int raw = (int) (accumulator & ((1L << n) - 1L));
-        return reverseBits(raw, n);
+        return PREFIX_REVERSE[n][raw];
     }
 
     /**

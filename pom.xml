@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  This POM declares Maven coordinates and the metadata Maven Central's
-  Publisher API validates (name/description/url/licenses/developers/scm) -
-  it performs no build or deploy action of its own. Ant (build.xml) is the
-  sole build tool for this project.
+  Maven coordinates and metadata for release publishing. Ant (build.xml) is
+  the sole build tool; this file is not used to compile. On release it is
+  uploaded to Maven Central (Publisher API) and GitHub Packages
+  (https://maven.pkg.github.com/cpkb-bluezoo/micula) together with the
+  Ant-built JARs.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

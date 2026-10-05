@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Builds, signs, bundles, and uploads a release to Maven Central's Publisher
-# API. The single canonical implementation of this process - both the
-# release-to-maven-central.yml workflow and a maintainer running this by
-# hand locally call this same script, so there is exactly one place that
-# knows how to do this, not two copies that can drift apart.
+# API, then (when GITHUB_TOKEN is set) uploads the same artifacts to GitHub
+# Packages via scripts/publish-to-github-packages.sh. The release workflow
+# and local maintainer runs use this script as the single entry point.
 #
 # Usage:
 #   GPG_KEY_ID=27196849F242508A \
@@ -132,3 +131,7 @@ if [ "$PUBLISHING_TYPE" = "USER_MANAGED" ]; then
     echo "This will NOT go live until you review and click Publish at:"
     echo "  https://central.sonatype.com/publishing/deployments"
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export VERSION
+"$SCRIPT_DIR/publish-to-github-packages.sh"

@@ -41,6 +41,11 @@ final class Dictionary {
 
     private static final int[] DOFFSET = new int[25];
 
+    private static final int DICT_HASH_BITS = 12;
+    private static final int DICT_HASH_SIZE = 1 << DICT_HASH_BITS;
+    private static final int[][] DICT_HASH_HEAD = new int[25][];
+    private static final int[][] DICT_HASH_CHAIN = new int[25][];
+
     // Transform types (Google / wire numbering used in transforms table)
     private static final int IDENTITY = 0;
     private static final int OMIT_LAST_1 = 1;
@@ -80,6 +85,37 @@ final class Dictionary {
             int nwords = NDBITS[len] == 0 ? 0 : (1 << NDBITS[len]);
             offset += nwords * len;
         }
+        buildDictionaryHashIndex();
+    }
+
+    private static void buildDictionaryHashIndex() {
+        for (int len = 4; len <= 24; len++) {
+            int nw = nwords(len);
+            if (nw == 0) {
+                continue;
+            }
+            int[] head = new int[DICT_HASH_SIZE];
+            for (int i = 0; i < DICT_HASH_SIZE; i++) {
+                head[i] = -1;
+            }
+            int[] chain = new int[nw];
+            int base = DOFFSET[len];
+            for (int idx = 0; idx < nw; idx++) {
+                int woff = base + idx * len;
+                int h = dictHash4(DICT, woff) & (DICT_HASH_SIZE - 1);
+                chain[idx] = head[h];
+                head[h] = idx;
+            }
+            DICT_HASH_HEAD[len] = head;
+            DICT_HASH_CHAIN[len] = chain;
+        }
+    }
+
+    private static int dictHash4(byte[] data, int offset) {
+        return (data[offset] & 0xff)
+                | ((data[offset + 1] & 0xff) << 8)
+                | ((data[offset + 2] & 0xff) << 16)
+                | ((data[offset + 3] & 0xff) << 24);
     }
 
     private Dictionary() {
@@ -253,17 +289,21 @@ final class Dictionary {
         int bestLen = 0;
         int bestTransform = 0;
         int bestIndex = 0;
-        byte[] tmp = new byte[MAX_TRANSFORMED_WORD_LENGTH];
+        int key = dictHash4(data, offset);
 
         for (int len = 24; len >= 4; len--) {
             if (len > available) {
                 continue;
             }
-            int nw = nwords(len);
+            int[] head = DICT_HASH_HEAD[len];
+            if (head == null) {
+                continue;
+            }
+            int h = key & (DICT_HASH_SIZE - 1);
             int base = DOFFSET[len];
-            for (int idx = 0; idx < nw; idx++) {
+            int[] chain = DICT_HASH_CHAIN[len];
+            for (int idx = head[h]; idx != -1; idx = chain[idx]) {
                 int woff = base + idx * len;
-                // Identity transform only for q2 speed
                 boolean match = true;
                 for (int i = 0; i < len; i++) {
                     if (DICT[woff + i] != data[offset + i]) {

@@ -1,0 +1,6 @@
+generated=20261005 2109
+openjdk version "25.0.4.1" 2026-08-18
+OpenJDK Runtime Environment (build 25.0.4.1+1)
+OpenJDK 64-Bit Server VM (build 25.0.4.1+1, mixed mode, sharing)
+ant=Apache Ant(TM) version 1.10.14 compiled on August 16 2023
+jmh=1.37

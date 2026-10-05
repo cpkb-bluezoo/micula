@@ -54,12 +54,20 @@ public final class BrotliDecoder {
     private static final int BLOCK_CATEGORY_I = 1;
     private static final int BLOCK_CATEGORY_D = 2;
 
+    /** Default max literal bytes before a {@link BrotliHandler#content} callback. */
+    private static final int DEFAULT_CONTENT_EMIT_THRESHOLD = 4096;
+
     private final BitReader br = new BitReader();
     private final DistanceRing distRing = new DistanceRing();
     private final int[] tmpBits = new int[1];
     private final int[] unpackOut = new int[3];
     private final byte[] dictScratch = new byte[Dictionary.MAX_TRANSFORMED_WORD_LENGTH];
+    private final int[] mtfScratch = new int[256];
     private final LocatorImpl locator = new LocatorImpl();
+
+    /** Literal bytes written to the ring but not yet passed to {@code content}. */
+    private int contentEmitPending;
+    private int contentEmitThreshold = DEFAULT_CONTENT_EMIT_THRESHOLD;
 
     private BrotliHandler handler = new BrotliDefaultHandler();
     private BrotliLimits limits = new BrotliLimits();
@@ -175,6 +183,23 @@ public final class BrotliDecoder {
     }
 
     /**
+     * Sets how many literal bytes may accumulate in the ring before
+     * {@link BrotliHandler#content} is invoked. Smaller values increase
+     * callback frequency; {@code 1} emits after every literal. The default is
+     * 4096. Pending output is always
+     * flushed at literal-run boundaries, before copies, and when decoding
+     * pauses for more input.
+     *
+     * @param bytes threshold in bytes (must be &gt;= 1)
+     */
+    public void setContentEmitThreshold(int bytes) {
+        if (bytes < 1) {
+            throw new IllegalArgumentException("contentEmitThreshold must be >= 1");
+        }
+        this.contentEmitThreshold = bytes;
+    }
+
+    /**
      * Feeds the next chunk of compressed data.
      *
      * @param data compressed bytes in read mode
@@ -191,6 +216,7 @@ public final class BrotliDecoder {
         br.setInput(data);
         process();
         if (state != DecoderState.DONE) {
+            flushContentEmit();
             br.savePending();
         }
     }
@@ -237,6 +263,7 @@ public final class BrotliDecoder {
         clearCompressedState();
         p1 = 0;
         p2 = 0;
+        contentEmitPending = 0;
         handlerBound = false;
     }
 
@@ -937,15 +964,14 @@ public final class BrotliDecoder {
             return false;
         }
         if (tmpBits[0] != 0) {
-            inverseMoveToFront(contextMapTarget, contextMapSize);
+            inverseMoveToFront(contextMapTarget, contextMapSize, mtfScratch);
         }
         contextMapTree = null;
         contextMapRleMax = -1;
         return true;
     }
 
-    private static void inverseMoveToFront(int[] v, int vLen) {
-        int[] mtf = new int[256];
+    private static void inverseMoveToFront(int[] v, int vLen, int[] mtf) {
         for (int i = 0; i < 256; i++) {
             mtf[i] = i;
         }
@@ -1000,6 +1026,7 @@ public final class BrotliDecoder {
         }
 
         // Emit any pending insert command event
+        flushContentEmit();
         flushInsertEvent();
 
         handler.endMetablock();
@@ -1153,11 +1180,23 @@ public final class BrotliDecoder {
         p2 = p1;
         p1 = sym;
         ring.writeByte(b);
-        ring.emitContent(handler, 1);
+        contentEmitPending++;
+        if (literalsRemaining == 1
+                || contentEmitPending >= contentEmitThreshold) {
+            flushContentEmit();
+        }
         metablockWritten++;
         literalsRemaining--;
         limits.checkTotalOutput(ring.getTotalWritten());
         return true;
+    }
+
+    private void flushContentEmit() throws BrotliException {
+        if (contentEmitPending <= 0) {
+            return;
+        }
+        ring.emitContent(handler, contentEmitPending);
+        contentEmitPending = 0;
     }
 
     private boolean resolveDistance() throws BrotliException {
@@ -1220,6 +1259,7 @@ public final class BrotliDecoder {
     }
 
     private boolean applyCopy() throws BrotliException {
+        flushContentEmit();
         flushInsertEvent();
 
         long maxAllowed = ring.getTotalWritten();
@@ -1288,6 +1328,7 @@ public final class BrotliDecoder {
     }
 
     private void finishStream() throws BrotliException {
+        flushContentEmit();
         br.jumpToByteBoundary(true);
         br.verifyTrailingBitsZero();
         handler.endStream();

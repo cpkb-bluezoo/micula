@@ -54,6 +54,29 @@ public final class BrotliEncoder {
 
     private final DistanceRing distRing = new DistanceRing();
 
+    private final int[] litHist = new int[256];
+    private final int[] iacHist = new int[704];
+    private final int[] distHist = new int[64];
+    private final int[] litLens = new int[256];
+    private final int[] iacLens = new int[704];
+    private final int[] distLens = new int[64];
+    private final int[] litCodes = new int[256];
+    private final int[] iacCodeTbl = new int[704];
+    private final int[] distCodeTbl = new int[64];
+    private final int[] packOut = new int[5];
+    private final int[] distOut = new int[3];
+
+    private int[] iacCodes;
+    private int[] insertExtras;
+    private int[] copyExtras;
+    private int[] insertExtraBits;
+    private int[] copyExtraBits;
+    private int[] distCodes;
+    private int[] distExtras;
+    private int[] distExtraBits;
+    private boolean[] writeDist;
+    private int cmdWorkspaceLen;
+
     /**
      * Creates an encoder that writes compressed bytes to {@code sink}.
      *
@@ -370,23 +393,10 @@ public final class BrotliEncoder {
         bw.writeBits(0, 1);
         bw.writeBits(0, 1);
 
-        int[] litHist = new int[256];
-        int[] iacHist = new int[704];
-        int[] distHist = new int[64];
-
-        // First pass: decide IaC / distance codes and build histograms
-        int[] iacCodes = new int[commands.length];
-        int[] insertExtras = new int[commands.length];
-        int[] copyExtras = new int[commands.length];
-        int[] insertExtraBits = new int[commands.length];
-        int[] copyExtraBits = new int[commands.length];
-        int[] distCodes = new int[commands.length];
-        int[] distExtras = new int[commands.length];
-        int[] distExtraBits = new int[commands.length];
-        boolean[] writeDist = new boolean[commands.length];
-
-        int[] packOut = new int[5];
-        int[] distOut = new int[3];
+        clearHistogram(litHist);
+        clearHistogram(iacHist);
+        clearHistogram(distHist);
+        ensureCmdWorkspace(commands.length);
 
         int bytesEmitted = 0;
         for (int ci = 0; ci < commands.length; ci++) {
@@ -451,16 +461,10 @@ public final class BrotliEncoder {
             distHist[0] = 1;
         }
 
-        int[] litLens = new int[256];
-        int[] iacLens = new int[704];
-        int[] distLens = new int[64];
         HuffmanEncoder.assignLengths(litHist, litLens, 15);
         HuffmanEncoder.assignLengths(iacHist, iacLens, 15);
         HuffmanEncoder.assignLengths(distHist, distLens, 15);
 
-        int[] litCodes = new int[256];
-        int[] iacCodeTbl = new int[704];
-        int[] distCodeTbl = new int[64];
         HuffmanTable.buildEncodeTables(litLens, litCodes);
         HuffmanTable.buildEncodeTables(iacLens, iacCodeTbl);
         HuffmanTable.buildEncodeTables(distLens, distCodeTbl);
@@ -548,5 +552,31 @@ public final class BrotliEncoder {
             s += a[i];
         }
         return s;
+    }
+
+    private static void clearHistogram(int[] hist) {
+        for (int i = 0; i < hist.length; i++) {
+            hist[i] = 0;
+        }
+    }
+
+    private void ensureCmdWorkspace(int commandCount) {
+        if (commandCount <= cmdWorkspaceLen) {
+            return;
+        }
+        int cap = cmdWorkspaceLen == 0 ? 16 : cmdWorkspaceLen;
+        while (cap < commandCount) {
+            cap *= 2;
+        }
+        iacCodes = new int[cap];
+        insertExtras = new int[cap];
+        copyExtras = new int[cap];
+        insertExtraBits = new int[cap];
+        copyExtraBits = new int[cap];
+        distCodes = new int[cap];
+        distExtras = new int[cap];
+        distExtraBits = new int[cap];
+        writeDist = new boolean[cap];
+        cmdWorkspaceLen = cap;
     }
 }

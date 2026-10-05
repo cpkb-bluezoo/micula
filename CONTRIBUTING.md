@@ -11,6 +11,15 @@ Run the unit tests:
 ant test
 ```
 
+JMH throughput benchmarks (see [benchmark/README.md](benchmark/README.md)):
+
+```bash
+ant jmh-smoke    # quick sanity check
+ant jmh          # all benchmarks
+ant jmh-results  # JSON under benchmark/results/
+ant jmh-baseline # refresh benchmark/baseline/ (use JDK 21)
+```
+
 ## Submitting Changes
 
 1. Fork the repository and create a branch for your changes

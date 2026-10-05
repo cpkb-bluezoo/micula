@@ -18,6 +18,15 @@
   <property name="junit.jar" value="junit-4.13.1.jar"/>
   <property name="hamcrest.jar" value="hamcrest-3.0.jar"/>
 
+  <property name="benchmark" location="benchmark"/>
+  <property name="benchmark.lib" location="${benchmark}/lib"/>
+  <property name="benchmark.build" location="${benchmark}/classes"/>
+  <property name="benchmark.results" location="${benchmark}/results"/>
+  <property name="jmh.version" value="1.37"/>
+  <property name="maven.central" value="https://repo1.maven.org/maven2"/>
+  <!-- Default: all benchmarks, modest iterations; override with -Djmh.args='...' -->
+  <property name="jmh.args" value="-wi 2 -i 3 -f 1 org.bluezoo.micula.bench"/>
+
   <target name="init">
     <tstamp/>
     <mkdir dir="${build}"/>
@@ -156,5 +165,123 @@
   </target>
 
   <target name="test" depends="junit-test"/>
+
+  <target name="jmh-libs" description="Download JMH and dependencies into benchmark/lib">
+    <mkdir dir="${benchmark.lib}"/>
+    <get src="${maven.central}/org/openjdk/jmh/jmh-core/${jmh.version}/jmh-core-${jmh.version}.jar"
+         dest="${benchmark.lib}/jmh-core-${jmh.version}.jar" skipexisting="true"/>
+    <get src="${maven.central}/org/openjdk/jmh/jmh-generator-annprocess/${jmh.version}/jmh-generator-annprocess-${jmh.version}.jar"
+         dest="${benchmark.lib}/jmh-generator-annprocess-${jmh.version}.jar" skipexisting="true"/>
+    <get src="${maven.central}/net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar"
+         dest="${benchmark.lib}/jopt-simple-5.0.4.jar" skipexisting="true"/>
+    <get src="${maven.central}/org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar"
+         dest="${benchmark.lib}/commons-math3-3.6.1.jar" skipexisting="true"/>
+  </target>
+
+  <path id="jmh.compile.classpath">
+    <fileset dir="${benchmark.lib}" includes="*.jar"/>
+    <pathelement location="${build}"/>
+  </path>
+
+  <path id="jmh.runtime.classpath">
+    <pathelement location="${benchmark.build}"/>
+    <fileset dir="${benchmark.lib}" includes="jmh-core-*.jar,jopt-simple-*.jar,commons-math3-*.jar"/>
+    <pathelement location="${build}"/>
+  </path>
+
+  <path id="jmh.processorpath">
+    <pathelement location="${benchmark.lib}/jmh-generator-annprocess-${jmh.version}.jar"/>
+    <pathelement location="${benchmark.lib}/jmh-core-${jmh.version}.jar"/>
+  </path>
+
+  <target name="jmh-build" depends="build,jmh-libs"
+          description="Compile JMH benchmarks">
+    <mkdir dir="${benchmark.build}"/>
+    <property name="jmh.processorpath.prop" refid="jmh.processorpath"/>
+    <javac srcdir="${benchmark}/src" destdir="${benchmark.build}" debug="true"
+           release="${java.release.version}"
+           includeantruntime="false">
+      <classpath refid="jmh.compile.classpath"/>
+      <compilerarg value="-processor"/>
+      <compilerarg value="org.openjdk.jmh.generators.BenchmarkProcessor"/>
+      <compilerarg value="-processorpath"/>
+      <compilerarg value="${jmh.processorpath.prop}"/>
+    </javac>
+  </target>
+
+  <target name="jmh" depends="jmh-build"
+          description="Run JMH benchmarks (pass -Djmh.args=...)">
+    <java classname="org.openjdk.jmh.Main" fork="true" failonerror="true">
+      <classpath refid="jmh.runtime.classpath"/>
+      <arg line="${jmh.args}"/>
+    </java>
+  </target>
+
+  <target name="jmh-smoke" depends="jmh-build"
+          description="CI-style minimal JMH run (one decode benchmark)">
+    <java classname="org.openjdk.jmh.Main" fork="true" failonerror="true">
+      <classpath refid="jmh.runtime.classpath"/>
+      <arg value="-wi"/>
+      <arg value="1"/>
+      <arg value="-i"/>
+      <arg value="1"/>
+      <arg value="-f"/>
+      <arg value="1"/>
+      <arg value="MiculaDecodeBench"/>
+    </java>
+  </target>
+
+  <target name="jmh-results" depends="jmh-build"
+          description="Run all benchmarks and write JSON to benchmark/results/">
+    <mkdir dir="${benchmark.results}"/>
+    <tstamp>
+      <format property="jmh.timestamp" pattern="yyyyMMdd-HHmmss"/>
+    </tstamp>
+    <java classname="org.openjdk.jmh.Main" fork="true" failonerror="true"
+          output="${benchmark.results}/jmh-${jmh.timestamp}.txt">
+      <classpath refid="jmh.runtime.classpath"/>
+      <arg value="-wi"/>
+      <arg value="3"/>
+      <arg value="-i"/>
+      <arg value="5"/>
+      <arg value="-f"/>
+      <arg value="1"/>
+      <arg value="-rf"/>
+      <arg value="json"/>
+      <arg value="-rff"/>
+      <arg value="${benchmark.results}/jmh-${jmh.timestamp}.json"/>
+      <arg value="org.bluezoo.micula.bench"/>
+    </java>
+    <echo message="Wrote ${benchmark.results}/jmh-${jmh.timestamp}.json"/>
+  </target>
+
+  <target name="jmh-baseline" depends="jmh-build"
+          description="Full JMH run; updates benchmark/baseline/jmh-reference.json">
+    <mkdir dir="${benchmark}/baseline"/>
+    <exec executable="java" failonerror="true"
+          outputproperty="baseline.java.version.out"
+          errorproperty="baseline.java.version">
+      <arg value="-version"/>
+    </exec>
+    <java classname="org.openjdk.jmh.Main" fork="true" failonerror="true"
+          output="${benchmark}/baseline/jmh-reference.txt">
+      <classpath refid="jmh.runtime.classpath"/>
+      <jvmarg value="-Duser.dir=${basedir}"/>
+      <arg value="-wi"/>
+      <arg value="3"/>
+      <arg value="-i"/>
+      <arg value="5"/>
+      <arg value="-f"/>
+      <arg value="1"/>
+      <arg value="-rf"/>
+      <arg value="json"/>
+      <arg value="-rff"/>
+      <arg value="${benchmark}/baseline/jmh-reference.json"/>
+      <arg value="org.bluezoo.micula.bench"/>
+    </java>
+    <echo file="${benchmark}/baseline/environment.txt"
+          message="generated=${DSTAMP} ${TSTAMP}${line.separator}${baseline.java.version}${line.separator}ant=${ant.version}${line.separator}jmh=${jmh.version}${line.separator}"/>
+    <echo message="Updated ${benchmark}/baseline/jmh-reference.json (see environment.txt)"/>
+  </target>
 
 </project>

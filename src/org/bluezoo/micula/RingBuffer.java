@@ -80,7 +80,31 @@ final class RingBuffer {
      * as in Brotli). Handles overlapping copies byte-by-byte.
      */
     void copyBackward(int distance, int length) {
+        if (length <= 0) {
+            return;
+        }
         long src = pos - distance;
+        if (distance >= length) {
+            int copied = 0;
+            while (copied < length) {
+                int srcIdx = (int) ((src + copied) & mask);
+                int dstIdx = (int) ((pos + copied) & mask);
+                int run = length - copied;
+                int toSrcEnd = data.length - srcIdx;
+                int toDstEnd = data.length - dstIdx;
+                if (run > toSrcEnd) {
+                    run = toSrcEnd;
+                }
+                if (run > toDstEnd) {
+                    run = toDstEnd;
+                }
+                System.arraycopy(data, srcIdx, data, dstIdx, run);
+                copied += run;
+            }
+            pos += length;
+            totalWritten += length;
+            return;
+        }
         for (int i = 0; i < length; i++) {
             byte b = data[(int) ((src + i) & mask)];
             data[(int) (pos & mask)] = b;

@@ -1,14 +1,10 @@
-name: Publish to Maven Central
+name: Publish release
 
-# All the actual work (build, sign, bundle, upload) lives in
-# scripts/publish-to-central.sh - the single canonical implementation, also
-# runnable by hand locally for a one-off publish that doesn't need a fresh
-# GitHub Release. This workflow just supplies secrets - VERSION is left
-# unset so the script auto-detects it from pom.xml's own <version> (and
-# cross-checks it against build.xml's "release" property), the same way a
-# local run would. This works identically whether triggered by a Release
-# (tag ref) or workflow_dispatch (which would also normally be run against
-# a tag, not a branch).
+# Build, sign, and upload to Maven Central and GitHub Packages via
+# scripts/publish-to-central.sh (which calls publish-to-github-packages.sh
+# when GITHUB_TOKEN is set). Runnable locally for Central-only by omitting
+# GITHUB_TOKEN. VERSION is auto-detected from pom.xml and cross-checked
+# against build.xml.
 #
 # publishingType defaults to AUTOMATIC in the script (see its own
 # comments): the bundle is uploaded and goes live on Central automatically
@@ -28,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
 
     steps:
       - name: Checkout code
@@ -38,6 +35,9 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
+
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
 
       - name: Import GPG key
         id: gpg
@@ -54,13 +54,16 @@ jobs:
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpgconf --reload gpg-agent
 
-      - name: Publish to Maven Central
+      - name: Publish to Maven Central and GitHub Packages
         run: ./scripts/publish-to-central.sh
         env:
           GPG_KEY_ID: ${{ steps.gpg.outputs.key_id }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           CENTRAL_TOKEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
           CENTRAL_TOKEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           KEEP_BUNDLE_AT: ${{ github.workspace }}/central-bundle.zip
 
       - name: Upload artifact for inspection

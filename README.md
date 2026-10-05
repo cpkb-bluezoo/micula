@@ -56,6 +56,15 @@ ant test
 
 Requires JDK 21+.
 
+## Maven dependency
+
+Releases are published to [Maven Central](https://central.sonatype.com/)
+(`org.bluezoo:micula`) and
+[GitHub Packages](https://github.com/cpkb-bluezoo/micula/packages)
+(`https://maven.pkg.github.com/cpkb-bluezoo/micula`). For GitHub Packages,
+add the repository and authenticate (for example `GITHUB_TOKEN` with
+`read:packages`).
+
 ## Documentation
 
 - [Javadoc (GitHub Pages)](https://cpkb-bluezoo.github.io/micula/doc/)

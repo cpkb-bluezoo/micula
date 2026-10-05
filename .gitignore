@@ -32,6 +32,9 @@ replay_pid*
 /doc/
 /test/junit/classes/
 /test/junit/results/
+/benchmark/lib/
+/benchmark/classes/
+/benchmark/results/
 
 # IDE
 .idea/
