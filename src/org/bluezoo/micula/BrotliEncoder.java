@@ -26,9 +26,10 @@ import java.nio.ByteBuffer;
 /**
  * Push-model Brotli encoder.
  *
- * <p>Quality 0 emits uncompressed metablocks. Qualities 1–2 use greedy LZ77
- * with one Huffman tree per alphabet (literals, insert-and-copy, distances).
- * Quality 2 also uses static dictionary matches.
+ * <p>Quality 0 emits uncompressed metablocks. Qualities 1–4 use LZ77 with
+ * one Huffman tree per alphabet (literals, insert-and-copy, distances).
+ * Quality 2+ uses static dictionary matches; quality 3+ deepens the LZ
+ * search; quality 4 also matches transformed dictionary words.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -100,8 +101,8 @@ public final class BrotliEncoder {
     }
 
     /**
-     * Sets compression quality. Accepts 0..11 for API stability; only 0, 1,
-     * and 2 are implemented.
+     * Sets compression quality. Accepts 0..11 for API stability; only 0–4
+     * are implemented.
      *
      * @param quality compression quality
      */
@@ -143,7 +144,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 2) {
+        if (quality > 4) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -183,7 +184,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 2) {
+        if (quality > 4) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -205,7 +206,7 @@ public final class BrotliEncoder {
             return;
         }
         ensureHeader();
-        if (quality > 2) {
+        if (quality > 4) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         if (quality == 0) {
@@ -324,11 +325,11 @@ public final class BrotliEncoder {
     private void flushCompressedMetablock(int length, boolean last)
             throws BrotliException {
         int windowSize = (1 << windowBits) - 16;
-        boolean useDict = quality >= 2;
+        Lz77Encoder.MatchMode mode = Lz77Encoder.MatchMode.forQuality(quality);
 
         Lz77Encoder.Command[][] box = new Lz77Encoder.Command[1][];
         Lz77Encoder.encode(pending, length, history, historyLen, windowSize,
-                useDict, box);
+                mode, box);
         Lz77Encoder.Command[] commands = box[0];
 
         writeCompressedMetablock(pending, length, commands, last);
@@ -444,7 +445,7 @@ public final class BrotliEncoder {
                         distRing.push(cmd.distance);
                     }
                 }
-                bytesEmitted += cmd.copyLen;
+                bytesEmitted += cmd.copyCovered;
                 if (bytesEmitted > length) {
                     bytesEmitted = length;
                 }

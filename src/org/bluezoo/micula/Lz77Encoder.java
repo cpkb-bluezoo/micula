@@ -22,7 +22,11 @@
 package org.bluezoo.micula;
 
 /**
- * Greedy LZ77 matcher producing insert/copy commands for qualities 1–2.
+ * LZ77 matcher producing insert/copy commands for qualities 1–4.
+ *
+ * <p>Qualities 1–2 use a single hash bucket (greedy). Qualities 3–4 walk a
+ * short hash chain and apply one-step lazy matching. Quality 4 also searches
+ * transformed dictionary words.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -32,13 +36,54 @@ final class Lz77Encoder {
     private static final int HASH_SIZE = 1 << HASH_BITS;
     private static final int MIN_MATCH = 4;
     private static final int MAX_MATCH = 16777215;
+    private static final int LAZY_MIN_LEN = 6;
+
+    /** Match search configuration for a quality level. */
+    static final class MatchMode {
+        final int chainDepth;
+        final boolean lazy;
+        final boolean useDictionary;
+        final boolean dictionaryTransforms;
+
+        MatchMode(int chainDepth, boolean lazy, boolean useDictionary,
+                boolean dictionaryTransforms) {
+            this.chainDepth = chainDepth;
+            this.lazy = lazy;
+            this.useDictionary = useDictionary;
+            this.dictionaryTransforms = dictionaryTransforms;
+        }
+
+        static MatchMode forQuality(int quality) {
+            switch (quality) {
+                case 1:
+                    return new MatchMode(1, false, false, false);
+                case 2:
+                    return new MatchMode(1, false, true, false);
+                case 3:
+                    return new MatchMode(4, true, true, false);
+                case 4:
+                    return new MatchMode(16, true, true, true);
+                default:
+                    throw new IllegalArgumentException("LZ77 quality " + quality);
+            }
+        }
+    }
 
     /** One insert+copy command. */
     static final class Command {
         /** Offset of literals within the current metablock buffer. */
         int insertOffset;
         int insertLen;
+        /**
+         * Wire copy length for {@link InsertCopyLengths#pack}: LZ match length,
+         * or dictionary word length L (4..24).
+         */
         int copyLen;
+        /**
+         * Plaintext bytes covered by the copy (equals {@link #copyLen} for LZ
+         * and identity dictionary; transformed dictionary output length otherwise).
+         */
+        int copyCovered;
         /**
          * Backward distance for LZ copies; for dictionary copies this is the
          * wire distance ({@code maxDistance + 1 + wordId}). Zero means
@@ -53,7 +98,7 @@ final class Lz77Encoder {
     }
 
     /**
-     * Greedy-parses {@code block[0..blockLen)} using optional history for
+     * Parses {@code block[0..blockLen)} using optional history for
      * cross-metablock matches.
      *
      * @param block current metablock bytes
@@ -61,13 +106,13 @@ final class Lz77Encoder {
      * @param history prior uncompressed bytes (may be null)
      * @param historyLen valid length of history
      * @param windowSize {@code (1<<wbits)-16}
-     * @param useDictionary quality 2: also try {@link Dictionary#findMatch}
+     * @param mode match configuration
      * @param outCommands {@code outCommands[0]} receives the command array
      * @return number of commands
      */
     static int encode(byte[] block, int blockLen,
             byte[] history, int historyLen,
-            int windowSize, boolean useDictionary,
+            int windowSize, MatchMode mode,
             Command[][] outCommands) {
         if (blockLen <= 0) {
             outCommands[0] = new Command[0];
@@ -80,14 +125,21 @@ final class Lz77Encoder {
         }
         int histStart = historyLen - histUse;
 
-        int[] hashTable = new int[HASH_SIZE];
+        int[] hashHead = new int[HASH_SIZE];
         for (int i = 0; i < HASH_SIZE; i++) {
-            hashTable[i] = -1;
+            hashHead[i] = -1;
+        }
+        // Chain: next absolute position with same hash; size covers history+block
+        int[] hashNext = new int[histUse + blockLen];
+        for (int i = 0; i < hashNext.length; i++) {
+            hashNext[i] = -1;
         }
 
         if (history != null && histUse >= MIN_MATCH) {
             for (int i = 0; i <= histUse - MIN_MATCH; i++) {
-                hashTable[hash3(history, histStart + i)] = i;
+                int h = hash3(history, histStart + i);
+                hashNext[i] = hashHead[h];
+                hashHead[h] = i;
             }
         }
 
@@ -97,69 +149,58 @@ final class Lz77Encoder {
         int pos = 0;
 
         int[] dictLenOut = new int[1];
+        int[] dictCoveredOut = new int[1];
         int[] dictTransformOut = new int[1];
         int[] dictIndexOut = new int[1];
 
+        int[] best = new int[4]; // covered, wireLen, dist, dictFlag
+        int[] lazyBest = new int[4];
+
         while (pos < blockLen) {
-            int absPos = histUse + pos;
-            int maxDist = absPos;
-            if (maxDist > windowSize) {
-                maxDist = windowSize;
+            findBestMatch(block, pos, blockLen, history, histStart, histUse,
+                    windowSize, mode, hashHead, hashNext,
+                    dictLenOut, dictCoveredOut, dictTransformOut, dictIndexOut,
+                    best);
+
+            if (best[0] >= MIN_MATCH && mode.lazy && best[0] < LAZY_MIN_LEN
+                    && pos + 1 < blockLen) {
+                // Insert current position into the hash before looking ahead
+                if (pos + MIN_MATCH <= blockLen) {
+                    insertHash(block, pos, histUse, hashHead, hashNext);
+                }
+                findBestMatch(block, pos + 1, blockLen, history, histStart, histUse,
+                        windowSize, mode, hashHead, hashNext,
+                        dictLenOut, dictCoveredOut, dictTransformOut, dictIndexOut,
+                        lazyBest);
+                if (lazyBest[0] > best[0]) {
+                    pos++;
+                    continue;
+                }
+            } else if (pos + MIN_MATCH <= blockLen) {
+                insertHash(block, pos, histUse, hashHead, hashNext);
             }
 
-            int bestLen = 0;
-            int bestDist = 0;
-            boolean bestDict = false;
-
-            if (pos + MIN_MATCH <= blockLen && maxDist >= 1) {
-                int h = hash3(block, pos);
-                int candAbs = hashTable[h];
-                if (candAbs >= 0) {
-                    int distance = absPos - candAbs;
-                    if (distance >= 1 && distance <= maxDist) {
-                        int matchLen = matchLength(block, pos, blockLen,
-                                history, histStart, histUse, candAbs);
-                        if (matchLen >= MIN_MATCH && matchLen > bestLen) {
-                            bestLen = matchLen;
-                            bestDist = distance;
-                            bestDict = false;
-                        }
-                    }
+            if (best[0] >= MIN_MATCH) {
+                int covered = best[0];
+                int remaining = blockLen - pos;
+                if (covered > remaining) {
+                    covered = remaining;
                 }
-                hashTable[h] = absPos;
-            }
-
-            if (useDictionary && pos + 4 <= blockLen) {
-                int avail = blockLen - pos;
-                if (avail > 24) {
-                    avail = 24;
-                }
-                int dlen = Dictionary.findMatch(block, pos, avail,
-                        dictLenOut, dictTransformOut, dictIndexOut);
-                if (dlen > bestLen) {
-                    int wordId = (dictTransformOut[0] << Dictionary.ndbits(dlen))
-                            + dictIndexOut[0];
-                    bestLen = dlen;
-                    bestDist = maxDist + 1 + wordId;
-                    bestDict = true;
-                }
-            }
-
-            if (bestLen >= MIN_MATCH) {
                 Command c = new Command();
                 c.insertOffset = litStart;
                 c.insertLen = pos - litStart;
-                c.copyLen = bestLen;
-                c.distance = bestDist;
-                c.dictionary = bestDict;
+                c.copyLen = best[1];
+                c.copyCovered = covered;
+                c.distance = best[2];
+                c.dictionary = best[3] != 0;
                 cmds = append(cmds, cmdCount, c);
                 cmdCount++;
 
-                int end = pos + bestLen;
+                int end = pos + covered;
                 pos++;
                 while (pos < end) {
                     if (pos + MIN_MATCH <= blockLen) {
-                        hashTable[hash3(block, pos)] = histUse + pos;
+                        insertHash(block, pos, histUse, hashHead, hashNext);
                     }
                     pos++;
                 }
@@ -174,6 +215,7 @@ final class Lz77Encoder {
             c.insertOffset = litStart;
             c.insertLen = blockLen - litStart;
             c.copyLen = 2;
+            c.copyCovered = 0;
             c.distance = 0;
             c.dictionary = false;
             cmds = append(cmds, cmdCount, c);
@@ -184,6 +226,78 @@ final class Lz77Encoder {
         System.arraycopy(cmds, 0, result, 0, cmdCount);
         outCommands[0] = result;
         return cmdCount;
+    }
+
+    /**
+     * Fills {@code out} with covered, wireLen, distance, dictFlag (0/1).
+     */
+    private static void findBestMatch(byte[] block, int pos, int blockLen,
+            byte[] history, int histStart, int histUse, int windowSize,
+            MatchMode mode, int[] hashHead, int[] hashNext,
+            int[] dictLenOut, int[] dictCoveredOut,
+            int[] dictTransformOut, int[] dictIndexOut,
+            int[] out) {
+        out[0] = 0;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
+
+        int absPos = histUse + pos;
+        int maxDist = absPos;
+        if (maxDist > windowSize) {
+            maxDist = windowSize;
+        }
+
+        if (pos + MIN_MATCH <= blockLen && maxDist >= 1) {
+            int h = hash3(block, pos);
+            int candAbs = hashHead[h];
+            int depth = 0;
+            while (candAbs >= 0 && depth < mode.chainDepth) {
+                int distance = absPos - candAbs;
+                if (distance >= 1 && distance <= maxDist) {
+                    int matchLen = matchLength(block, pos, blockLen,
+                            history, histStart, histUse, candAbs);
+                    if (matchLen >= MIN_MATCH && matchLen > out[0]) {
+                        out[0] = matchLen;
+                        out[1] = matchLen;
+                        out[2] = distance;
+                        out[3] = 0;
+                    }
+                }
+                if (candAbs >= hashNext.length) {
+                    break;
+                }
+                candAbs = hashNext[candAbs];
+                depth++;
+            }
+        }
+
+        if (mode.useDictionary && pos + 4 <= blockLen) {
+            int avail = blockLen - pos;
+            if (avail > Dictionary.MAX_TRANSFORMED_WORD_LENGTH) {
+                avail = Dictionary.MAX_TRANSFORMED_WORD_LENGTH;
+            }
+            int covered = Dictionary.findMatch(block, pos, avail,
+                    mode.dictionaryTransforms,
+                    dictLenOut, dictCoveredOut, dictTransformOut, dictIndexOut);
+            if (covered > out[0]) {
+                int wireLen = dictLenOut[0];
+                int wordId = (dictTransformOut[0] << Dictionary.ndbits(wireLen))
+                        + dictIndexOut[0];
+                out[0] = covered;
+                out[1] = wireLen;
+                out[2] = maxDist + 1 + wordId;
+                out[3] = 1;
+            }
+        }
+    }
+
+    private static void insertHash(byte[] block, int pos, int histUse,
+            int[] hashHead, int[] hashNext) {
+        int absPos = histUse + pos;
+        int h = hash3(block, pos);
+        hashNext[absPos] = hashHead[h];
+        hashHead[h] = absPos;
     }
 
     private static Command[] append(Command[] cmds, int count, Command c) {

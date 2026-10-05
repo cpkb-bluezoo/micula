@@ -46,6 +46,20 @@ final class Dictionary {
     private static final int[][] DICT_HASH_HEAD = new int[25][];
     private static final int[][] DICT_HASH_CHAIN = new int[25][];
 
+    /**
+     * Hash of transformed dictionary outputs for encoder quality 4.
+     * Indexed transforms: identity (with affixes), omit-last-1, uppercase-first,
+     * uppercase-all. Pure identity (empty affixes) stays on {@link #DICT_HASH_HEAD}.
+     */
+    private static final int XFORM_HASH_BITS = 14;
+    private static final int XFORM_HASH_SIZE = 1 << XFORM_HASH_BITS;
+    private static int[] XFORM_HEAD;
+    private static int[] XFORM_NEXT;
+    private static int[] XFORM_WORD_LEN;
+    private static int[] XFORM_WORD_INDEX;
+    private static int[] XFORM_TRANSFORM_ID;
+    private static int[] XFORM_OUT_LEN;
+
     // Transform types (Google / wire numbering used in transforms table)
     private static final int IDENTITY = 0;
     private static final int OMIT_LAST_1 = 1;
@@ -54,6 +68,11 @@ final class Dictionary {
     private static final int UPPERCASE_ALL = 11;
     private static final int OMIT_FIRST_1 = 12;
     private static final int OMIT_FIRST_9 = 20;
+
+    /** Transform types included in the quality-4 index. */
+    private static final int[] INDEXED_TRANSFORM_TYPES = {
+        IDENTITY, OMIT_LAST_1, UPPERCASE_FIRST, UPPERCASE_ALL
+    };
 
     /**
      * Prefix/suffix blob: each entry is length-prefixed string.
@@ -86,6 +105,7 @@ final class Dictionary {
             offset += nwords * len;
         }
         buildDictionaryHashIndex();
+        buildTransformHashIndex();
     }
 
     private static void buildDictionaryHashIndex() {
@@ -108,6 +128,90 @@ final class Dictionary {
             }
             DICT_HASH_HEAD[len] = head;
             DICT_HASH_CHAIN[len] = chain;
+        }
+    }
+
+    private static boolean isIndexedTransformType(int type) {
+        for (int i = 0; i < INDEXED_TRANSFORM_TYPES.length; i++) {
+            if (INDEXED_TRANSFORM_TYPES[i] == type) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int prefixSuffixLen(int mapId) {
+        return PREFIX_SUFFIX[PREFIX_SUFFIX_MAP[mapId]] & 0xff;
+    }
+
+    private static void buildTransformHashIndex() {
+        // Count entries first
+        int count = 0;
+        byte[] tmp = new byte[MAX_TRANSFORMED_WORD_LENGTH];
+        for (int tid = 0; tid < NUM_TRANSFORMS; tid++) {
+            int type = TRANSFORMS[tid * 3 + 1] & 0xff;
+            if (!isIndexedTransformType(type)) {
+                continue;
+            }
+            int prefixId = TRANSFORMS[tid * 3] & 0xff;
+            int suffixId = TRANSFORMS[tid * 3 + 2] & 0xff;
+            // Pure identity (empty affixes) is covered by DICT_HASH_HEAD
+            if (type == IDENTITY && prefixSuffixLen(prefixId) == 0
+                    && prefixSuffixLen(suffixId) == 0) {
+                continue;
+            }
+            for (int len = 4; len <= 24; len++) {
+                int nw = nwords(len);
+                int base = DOFFSET[len];
+                for (int idx = 0; idx < nw; idx++) {
+                    int outLen = transform(DICT, base + idx * len, len, tid, tmp);
+                    if (outLen >= 4) {
+                        count++;
+                    }
+                }
+            }
+        }
+
+        XFORM_HEAD = new int[XFORM_HASH_SIZE];
+        for (int i = 0; i < XFORM_HASH_SIZE; i++) {
+            XFORM_HEAD[i] = -1;
+        }
+        XFORM_NEXT = new int[count];
+        XFORM_WORD_LEN = new int[count];
+        XFORM_WORD_INDEX = new int[count];
+        XFORM_TRANSFORM_ID = new int[count];
+        XFORM_OUT_LEN = new int[count];
+
+        int slot = 0;
+        for (int tid = 0; tid < NUM_TRANSFORMS; tid++) {
+            int type = TRANSFORMS[tid * 3 + 1] & 0xff;
+            if (!isIndexedTransformType(type)) {
+                continue;
+            }
+            int prefixId = TRANSFORMS[tid * 3] & 0xff;
+            int suffixId = TRANSFORMS[tid * 3 + 2] & 0xff;
+            if (type == IDENTITY && prefixSuffixLen(prefixId) == 0
+                    && prefixSuffixLen(suffixId) == 0) {
+                continue;
+            }
+            for (int len = 4; len <= 24; len++) {
+                int nw = nwords(len);
+                int base = DOFFSET[len];
+                for (int idx = 0; idx < nw; idx++) {
+                    int outLen = transform(DICT, base + idx * len, len, tid, tmp);
+                    if (outLen < 4) {
+                        continue;
+                    }
+                    int h = dictHash4(tmp, 0) & (XFORM_HASH_SIZE - 1);
+                    XFORM_NEXT[slot] = XFORM_HEAD[h];
+                    XFORM_HEAD[h] = slot;
+                    XFORM_WORD_LEN[slot] = len;
+                    XFORM_WORD_INDEX[slot] = idx;
+                    XFORM_TRANSFORM_ID[slot] = tid;
+                    XFORM_OUT_LEN[slot] = outLen;
+                    slot++;
+                }
+            }
         }
     }
 
@@ -282,13 +386,24 @@ final class Dictionary {
     /**
      * Finds a dictionary word match for the encoder (greedy).
      *
-     * @return transform word id base distance contribution, or -1
+     * @param useTransforms if true, also search uppercase / omit-last / affixed identity
+     * @param outLength wire copy length L (4..24)
+     * @param outCovered plaintext bytes covered (transformed output length)
+     * @param outTransformId transform id
+     * @param outWordIndex dictionary word index
+     * @return covered length on success, or -1
      */
     static int findMatch(byte[] data, int offset, int available,
-            int[] outLength, int[] outTransformId, int[] outWordIndex) {
-        int bestLen = 0;
+            boolean useTransforms,
+            int[] outLength, int[] outCovered,
+            int[] outTransformId, int[] outWordIndex) {
+        int bestCovered = 0;
+        int bestWireLen = 0;
         int bestTransform = 0;
         int bestIndex = 0;
+        if (available < 4) {
+            return -1;
+        }
         int key = dictHash4(data, offset);
 
         for (int len = 24; len >= 4; len--) {
@@ -311,27 +426,67 @@ final class Dictionary {
                         break;
                     }
                 }
-                if (match && len > bestLen) {
-                    bestLen = len;
+                if (match && len > bestCovered) {
+                    bestCovered = len;
+                    bestWireLen = len;
                     bestTransform = 0;
                     bestIndex = idx;
-                    if (bestLen >= 24) {
-                        outLength[0] = bestLen;
+                    if (bestCovered >= 24) {
+                        outLength[0] = bestWireLen;
+                        outCovered[0] = bestCovered;
                         outTransformId[0] = bestTransform;
                         outWordIndex[0] = bestIndex;
-                        return bestLen;
+                        return bestCovered;
                     }
                 }
             }
-            if (bestLen >= len) {
+            if (bestCovered >= len) {
                 break;
             }
         }
-        if (bestLen >= 4) {
-            outLength[0] = bestLen;
+
+        if (useTransforms) {
+            byte[] tmp = new byte[MAX_TRANSFORMED_WORD_LENGTH];
+            int h = key & (XFORM_HASH_SIZE - 1);
+            for (int slot = XFORM_HEAD[h]; slot != -1; slot = XFORM_NEXT[slot]) {
+                int outLen = XFORM_OUT_LEN[slot];
+                if (outLen > available || outLen <= bestCovered) {
+                    continue;
+                }
+                int wordLen = XFORM_WORD_LEN[slot];
+                int wordIndex = XFORM_WORD_INDEX[slot];
+                int tid = XFORM_TRANSFORM_ID[slot];
+                int produced = transform(DICT,
+                        DOFFSET[wordLen] + wordIndex * wordLen,
+                        wordLen, tid, tmp);
+                if (produced != outLen) {
+                    continue;
+                }
+                boolean match = true;
+                for (int i = 0; i < outLen; i++) {
+                    if (tmp[i] != data[offset + i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    bestCovered = outLen;
+                    bestWireLen = wordLen;
+                    bestTransform = tid;
+                    bestIndex = wordIndex;
+                    if (bestCovered >= MAX_TRANSFORMED_WORD_LENGTH) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (bestCovered >= 4) {
+            outLength[0] = bestWireLen;
+            outCovered[0] = bestCovered;
             outTransformId[0] = bestTransform;
             outWordIndex[0] = bestIndex;
-            return bestLen;
+            return bestCovered;
         }
         return -1;
     }

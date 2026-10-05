@@ -18,7 +18,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Encoder tests for qualities 0–2 and API guards.
+ * Encoder tests for qualities 0–4 and API guards.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -50,6 +50,28 @@ public class BrotliEncoderTest {
             .getBytes(StandardCharsets.UTF_8);
         byte[] compressed = encode(original, 2);
         assertArrayEquals(original, BrotliDecoderTest.decodeAll(compressed));
+    }
+
+    @Test
+    public void testQuality3And4RoundTrip() throws Exception {
+        byte[] original = ("the quick brown fox time with that from the time ")
+            .getBytes(StandardCharsets.UTF_8);
+        for (int quality = 3; quality <= 4; quality++) {
+            assertArrayEquals("quality " + quality, original,
+                BrotliDecoderTest.decodeAll(encode(original, quality)));
+        }
+    }
+
+    /**
+     * Capitalized dictionary-friendly words: quality 4 may use uppercase
+     * transforms; quality 2 still round-trips with identity-only matches.
+     */
+    @Test
+    public void testQuality4TransformedDictionaryWords() throws Exception {
+        byte[] original = ("Time and That with From the World and Time again")
+            .getBytes(StandardCharsets.US_ASCII);
+        assertArrayEquals(original, BrotliDecoderTest.decodeAll(encode(original, 2)));
+        assertArrayEquals(original, BrotliDecoderTest.decodeAll(encode(original, 4)));
     }
 
     @Test
@@ -117,7 +139,7 @@ public class BrotliEncoderTest {
     @Test
     public void testLastDistanceCopyAfterLongInsertIssue1() throws Exception {
         byte[] original = "d with the theith ".getBytes(StandardCharsets.US_ASCII);
-        for (int quality = 1; quality <= 2; quality++) {
+        for (int quality = 1; quality <= 4; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -130,7 +152,7 @@ public class BrotliEncoderTest {
         java.util.Arrays.fill(original, (byte) 0xcd);
         original[0] = (byte) 0xce;
         original[6] = (byte) 0xc0;
-        for (int quality = 1; quality <= 2; quality++) {
+        for (int quality = 1; quality <= 4; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -143,7 +165,7 @@ public class BrotliEncoderTest {
             0x6c, 0x0b, (byte) 0xff, 0x0b, (byte) 0xff, 0x6c, 0x46, (byte) 0xff,
             0x6c, 0x0b, (byte) 0xff, 0x6c, 0x0b, (byte) 0xff
         };
-        for (int quality = 1; quality <= 2; quality++) {
+        for (int quality = 1; quality <= 4; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -158,7 +180,7 @@ public class BrotliEncoderTest {
         for (int i = 0; i < original.length; i++) {
             original[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
         }
-        for (int quality = 1; quality <= 2; quality++) {
+        for (int quality = 1; quality <= 4; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -206,7 +228,7 @@ public class BrotliEncoderTest {
                         break;
                 }
             }
-            for (int quality = 1; quality <= 2; quality++) {
+            for (int quality = 1; quality <= 4; quality++) {
                 assertArrayEquals("input " + i + " quality " + quality, d,
                     BrotliDecoderTest.decodeAll(encode(d, quality)));
             }
@@ -221,7 +243,7 @@ public class BrotliEncoderTest {
     @Test
     public void testFourSymbolSimpleCodeLiteralsIssue1() throws Exception {
         byte[] original = "aaeecdee".getBytes(StandardCharsets.US_ASCII);
-        for (int quality = 1; quality <= 2; quality++) {
+        for (int quality = 1; quality <= 4; quality++) {
             byte[] compressed = encode(original, quality);
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(compressed));
@@ -250,7 +272,7 @@ public class BrotliEncoderTest {
                 }
             }
             byte[] original = sb.toString().getBytes(StandardCharsets.US_ASCII);
-            for (int quality = 1; quality <= 2; quality++) {
+            for (int quality = 1; quality <= 4; quality++) {
                 assertArrayEquals(sb + " quality " + quality, original,
                     BrotliDecoderTest.decodeAll(encode(original, quality)));
             }
