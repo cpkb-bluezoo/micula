@@ -26,10 +26,12 @@ import java.nio.ByteBuffer;
 /**
  * Push-model Brotli encoder.
  *
- * <p>Quality 0 emits uncompressed metablocks. Qualities 1–6 use LZ77 with
+ * <p>Quality 0 emits uncompressed metablocks. Qualities 1–8 use LZ77 with
  * Huffman coding. Quality 2+ uses the static dictionary; 3+ deepens LZ search;
  * 4+ matches transformed dictionary words; 5+ uses literal context maps;
- * 6 adds a literal block split and distance context trees.
+ * 6 adds a literal block split and distance context trees; 7 tunes
+ * NPOSTFIX/NDIRECT; 8 uses up to four literal trees and an insert-and-copy
+ * block split.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -37,6 +39,14 @@ public final class BrotliEncoder {
 
     private static final int MAX_METABLOCK = 1 << 24;
     private static final int DEFAULT_BLOCK = 1 << 16;
+
+    private static final int MAX_DIST_ALPHABET = 256;
+    private static final int[][] POSTFIX_CANDIDATES = {
+        { 0, 0 },
+        { 0, 4 },
+        { 1, 0 },
+        { 2, 0 }
+    };
 
     private final BitWriter bw;
     private int quality = 0;
@@ -57,19 +67,28 @@ public final class BrotliEncoder {
 
     private final int[] litHist = new int[256];
     private final int[] litHist1 = new int[256];
+    private final int[] litHist2 = new int[256];
+    private final int[] litHist3 = new int[256];
     private final int[] iacHist = new int[704];
-    private final int[] distHist = new int[64];
-    private final int[] distHist1 = new int[64];
+    private final int[] iacHist1 = new int[704];
+    private final int[] distHist = new int[MAX_DIST_ALPHABET];
+    private final int[] distHist1 = new int[MAX_DIST_ALPHABET];
     private final int[] litLens = new int[256];
     private final int[] litLens1 = new int[256];
+    private final int[] litLens2 = new int[256];
+    private final int[] litLens3 = new int[256];
     private final int[] iacLens = new int[704];
-    private final int[] distLens = new int[64];
-    private final int[] distLens1 = new int[64];
+    private final int[] iacLens1 = new int[704];
+    private final int[] distLens = new int[MAX_DIST_ALPHABET];
+    private final int[] distLens1 = new int[MAX_DIST_ALPHABET];
     private final int[] litCodes = new int[256];
     private final int[] litCodes1 = new int[256];
+    private final int[] litCodes2 = new int[256];
+    private final int[] litCodes3 = new int[256];
     private final int[] iacCodeTbl = new int[704];
-    private final int[] distCodeTbl = new int[64];
-    private final int[] distCodeTbl1 = new int[64];
+    private final int[] iacCodeTbl1 = new int[704];
+    private final int[] distCodeTbl = new int[MAX_DIST_ALPHABET];
+    private final int[] distCodeTbl1 = new int[MAX_DIST_ALPHABET];
     private final int[] packOut = new int[5];
     private final int[] distOut = new int[3];
     private final int[] blenPack = new int[3];
@@ -81,6 +100,12 @@ public final class BrotliEncoder {
     private final int[] btypeCodes = new int[4];
     private final int[] cmapL = new int[128];
     private final int[] cmapD = new int[4];
+    private final int[] litTreeOfContext = new int[64];
+    private final int[] distScratch = new int[4096];
+    private final int[] iBtypeLens = new int[4];
+    private final int[] iBtypeCodes = new int[4];
+    private final int[] iBlenLens = new int[26];
+    private final int[] iBlenCodes = new int[26];
 
     private int[] iacCodes;
     private int[] insertExtras;
@@ -116,7 +141,7 @@ public final class BrotliEncoder {
     }
 
     /**
-     * Sets compression quality. Accepts 0..11 for API stability; only 0–6
+     * Sets compression quality. Accepts 0..11 for API stability; only 0–8
      * are implemented.
      *
      * @param quality compression quality
@@ -159,7 +184,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 6) {
+        if (quality > 8) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -199,7 +224,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 6) {
+        if (quality > 8) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -221,7 +246,7 @@ public final class BrotliEncoder {
             return;
         }
         ensureHeader();
-        if (quality > 6) {
+        if (quality > 8) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         if (quality == 0) {
@@ -480,21 +505,29 @@ public final class BrotliEncoder {
         if (sum(iacHist) == 0) {
             iacHist[0] = 1;
         }
-        if (sum(distHist) == 0) {
+        // NPOSTFIX=0, NDIRECT=0 → distance alphabet 64
+        final int distAlphabet = 64;
+        if (sumRange(distHist, distAlphabet) == 0) {
             distHist[0] = 1;
         }
 
+        int[] distHistWrite = trimHist(distHist, distAlphabet);
+        int[] distLensWrite = new int[distAlphabet];
+        int[] distCodesWrite = new int[distAlphabet];
+
         HuffmanEncoder.assignLengths(litHist, litLens, 15);
         HuffmanEncoder.assignLengths(iacHist, iacLens, 15);
-        HuffmanEncoder.assignLengths(distHist, distLens, 15);
+        HuffmanEncoder.assignLengths(distHistWrite, distLensWrite, 15);
 
         HuffmanTable.buildEncodeTables(litLens, litCodes);
         HuffmanTable.buildEncodeTables(iacLens, iacCodeTbl);
-        HuffmanTable.buildEncodeTables(distLens, distCodeTbl);
+        HuffmanTable.buildEncodeTables(distLensWrite, distCodesWrite);
+        System.arraycopy(distLensWrite, 0, distLens, 0, distAlphabet);
+        System.arraycopy(distCodesWrite, 0, distCodeTbl, 0, distAlphabet);
 
         HuffmanEncoder.writePrefixCode(bw, litHist);
         HuffmanEncoder.writePrefixCode(bw, iacHist);
-        HuffmanEncoder.writePrefixCode(bw, distHist);
+        HuffmanEncoder.writePrefixCode(bw, distHistWrite);
 
         for (int ci = 0; ci < commands.length; ci++) {
             Lz77Encoder.Command cmd = commands[ci];
@@ -527,8 +560,11 @@ public final class BrotliEncoder {
 
     private void writeCompressedMetablockContext(byte[] data, int length,
             Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
-        boolean useBlockSplit = quality >= 6;
+        boolean useLitBlockSplit = quality >= 6;
         boolean useDistTrees = quality >= 6;
+        boolean useFourLitTrees = quality >= 8;
+        boolean useIacSplit = quality >= 8;
+        boolean choosePostfix = quality >= 7;
 
         int totalLiterals = 0;
         for (int ci = 0; ci < commands.length; ci++) {
@@ -536,26 +572,55 @@ public final class BrotliEncoder {
         }
 
         int nbltypesL = 1;
-        int firstBlockLen = totalLiterals;
-        if (useBlockSplit && totalLiterals >= 64) {
+        int firstLitBlockLen = totalLiterals;
+        if (useLitBlockSplit && totalLiterals >= 64) {
             nbltypesL = 2;
-            firstBlockLen = totalLiterals / 2;
-            if (firstBlockLen < 1) {
-                firstBlockLen = 1;
+            firstLitBlockLen = totalLiterals / 2;
+            if (firstLitBlockLen < 1) {
+                firstLitBlockLen = 1;
             }
-            if (firstBlockLen >= totalLiterals) {
-                firstBlockLen = totalLiterals - 1;
+            if (firstLitBlockLen >= totalLiterals) {
+                firstLitBlockLen = totalLiterals - 1;
             }
         } else {
-            useBlockSplit = false;
+            useLitBlockSplit = false;
             nbltypesL = 1;
-            firstBlockLen = totalLiterals > 0 ? totalLiterals : 1;
+            firstLitBlockLen = totalLiterals > 0 ? totalLiterals : 1;
         }
 
-        // --- Pass 1: IAC / distance codes (same as simple) plus context lit/dist hist
+        int nbltypesI = 1;
+        int firstIacBlock = commands.length;
+        if (useIacSplit && commands.length >= 32) {
+            nbltypesI = 2;
+            firstIacBlock = commands.length / 2;
+            if (firstIacBlock < 1) {
+                firstIacBlock = 1;
+            }
+            if (firstIacBlock >= commands.length) {
+                nbltypesI = 1;
+                useIacSplit = false;
+                firstIacBlock = commands.length;
+            }
+        } else {
+            useIacSplit = false;
+        }
+
+        int npostfix = 0;
+        int ndirect = 0;
+        if (choosePostfix) {
+            int[] chosen = choosePostfixPair(commands, length);
+            npostfix = chosen[0];
+            ndirect = chosen[1];
+        }
+        int distAlphabet = 16 + ndirect + (48 << npostfix);
+
+        // --- Pass 1: IAC / distance codes plus context histograms
         clearHistogram(litHist);
         clearHistogram(litHist1);
+        clearHistogram(litHist2);
+        clearHistogram(litHist3);
         clearHistogram(iacHist);
+        clearHistogram(iacHist1);
         clearHistogram(distHist);
         clearHistogram(distHist1);
         ensureCmdWorkspace(commands.length);
@@ -571,12 +636,8 @@ public final class BrotliEncoder {
             for (int j = 0; j < cmd.insertLen; j++) {
                 int lit = data[cmd.insertOffset + j] & 0xff;
                 int cid = Context.literalContextId(Context.UTF8, p1, p2);
-                int tree = (cid < 32) ? 0 : 1;
-                if (tree == 0) {
-                    litHist[lit]++;
-                } else {
-                    litHist1[lit]++;
-                }
+                int bucket = useFourLitTrees ? (cid >> 4) : (cid < 32 ? 0 : 1);
+                litHistBucket(bucket)[lit]++;
                 p2 = p1;
                 p1 = lit;
                 litCount++;
@@ -605,16 +666,23 @@ public final class BrotliEncoder {
             copyExtras[ci] = packOut[2];
             insertExtraBits[ci] = packOut[3];
             copyExtraBits[ci] = packOut[4];
-            iacHist[iacCodes[ci]]++;
+            if (nbltypesI >= 2 && ci >= firstIacBlock) {
+                iacHist1[iacCodes[ci]]++;
+            } else {
+                iacHist[iacCodes[ci]]++;
+            }
 
             writeDist[ci] = false;
             if (!skipDistance && !insertOnly) {
                 writeDist[ci] = !implicitDist0;
                 if (!implicitDist0) {
-                    encodeDistance(cmd.distance, distRing, distOut);
+                    encodeDistance(cmd.distance, npostfix, ndirect, distRing, distOut);
                     distCodes[ci] = distOut[0];
                     distExtras[ci] = distOut[1];
                     distExtraBits[ci] = distOut[2];
+                    if (distCodes[ci] >= distAlphabet) {
+                        throw new BrotliException("Distance code out of alphabet");
+                    }
                     int dcid = Context.distanceContextId(copyLen);
                     if (useDistTrees && dcid > 0) {
                         distHist1[distCodes[ci]]++;
@@ -638,42 +706,57 @@ public final class BrotliEncoder {
             }
         }
 
-        int ntreesL = 2;
-        if (sum(litHist1) == 0) {
-            ntreesL = 1;
-        }
-        if (sum(litHist) == 0) {
-            if (ntreesL == 2) {
-                // Swap: only tree 1 has symbols
-                System.arraycopy(litHist1, 0, litHist, 0, 256);
-                clearHistogram(litHist1);
-                ntreesL = 1;
+        // Compact literal trees
+        int[][] litBuckets = new int[][] { litHist, litHist1, litHist2, litHist3 };
+        int maxBuckets = useFourLitTrees ? 4 : 2;
+        int[] bucketToTree = new int[4];
+        int ntreesL = 0;
+        for (int b = 0; b < maxBuckets; b++) {
+            if (sum(litBuckets[b]) > 0) {
+                bucketToTree[b] = ntreesL;
+                if (ntreesL != b) {
+                    System.arraycopy(litBuckets[b], 0, litBuckets[ntreesL], 0, 256);
+                    clearHistogram(litBuckets[b]);
+                }
+                ntreesL++;
             } else {
-                litHist[0] = 1;
+                bucketToTree[b] = -1;
             }
+        }
+        if (ntreesL == 0) {
+            litHist[0] = 1;
+            ntreesL = 1;
+            bucketToTree[0] = 0;
+        }
+        for (int cid = 0; cid < 64; cid++) {
+            int bucket = useFourLitTrees ? (cid >> 4) : (cid < 32 ? 0 : 1);
+            int t = bucketToTree[bucket];
+            litTreeOfContext[cid] = (t >= 0) ? t : 0;
         }
 
         int ntreesD = 1;
-        if (useDistTrees && sum(distHist1) > 0 && sum(distHist) > 0) {
+        if (useDistTrees && sumRange(distHist1, distAlphabet) > 0
+                && sumRange(distHist, distAlphabet) > 0) {
             ntreesD = 2;
-        } else if (useDistTrees && sum(distHist1) > 0) {
-            System.arraycopy(distHist1, 0, distHist, 0, 64);
+        } else if (useDistTrees && sumRange(distHist1, distAlphabet) > 0) {
+            System.arraycopy(distHist1, 0, distHist, 0, distAlphabet);
             clearHistogram(distHist1);
             ntreesD = 1;
         }
-        if (sum(distHist) == 0) {
+        if (sumRange(distHist, distAlphabet) == 0) {
             distHist[0] = 1;
         }
         if (sum(iacHist) == 0) {
             iacHist[0] = 1;
         }
+        if (nbltypesI >= 2 && sum(iacHist1) == 0) {
+            iacHist1[0] = 1;
+        }
 
-        // Context maps
         int mapLSize = 64 * nbltypesL;
         for (int bt = 0; bt < nbltypesL; bt++) {
             for (int cid = 0; cid < 64; cid++) {
-                int tree = (ntreesL >= 2 && cid >= 32) ? 1 : 0;
-                cmapL[64 * bt + cid] = tree;
+                cmapL[64 * bt + cid] = litTreeOfContext[cid];
             }
         }
         cmapD[0] = 0;
@@ -692,45 +775,24 @@ public final class BrotliEncoder {
         }
 
         // NBLTYPESL
-        if (nbltypesL == 1) {
-            bw.writeBits(0, 1);
-        } else {
-            ContextMapWriter.writeVarLenUint8PlusOne(bw, nbltypesL);
-            // Block-type tree: only symbol 1 (next type) is used at the switch
-            clearHistogram(btypeHist);
-            btypeHist[1] = 1;
-            HuffmanEncoder.writePrefixCode(bw, btypeHist);
-            HuffmanEncoder.assignLengths(btypeHist, btypeLens, 15);
-            HuffmanTable.buildEncodeTables(btypeLens, btypeCodes);
+        writeBlockTypeGroupHeader(nbltypesL, firstLitBlockLen,
+                totalLiterals - firstLitBlockLen);
 
-            // Block-length tree from the two lengths we emit
-            clearHistogram(blenHist);
-            BlockLengthEncoder.pack(firstBlockLen, blenPack);
-            blenHist[blenPack[0]]++;
-            int secondLen = totalLiterals - firstBlockLen;
-            BlockLengthEncoder.pack(secondLen, blenPack);
-            blenHist[blenPack[0]]++;
-            HuffmanEncoder.writePrefixCode(bw, blenHist);
-            HuffmanEncoder.assignLengths(blenHist, blenLens, 15);
-            HuffmanTable.buildEncodeTables(blenLens, blenCodes);
+        // NBLTYPESI
+        writeBlockTypeGroupHeader(nbltypesI, firstIacBlock,
+                commands.length - firstIacBlock);
 
-            BlockLengthEncoder.write(bw, firstBlockLen, blenLens, blenCodes);
-        }
-
-        // NBLTYPESI = 1, NBLTYPESD = 1
-        bw.writeBits(0, 1);
+        // NBLTYPESD = 1
         bw.writeBits(0, 1);
 
-        // NPOSTFIX=0, NDIRECT=0
-        bw.writeBits(0, 2);
-        bw.writeBits(0, 4);
+        // NPOSTFIX / NDIRECT
+        bw.writeBits(npostfix, 2);
+        bw.writeBits(ndirect >> npostfix, 4);
 
-        // Context modes: UTF8 for each literal block type
         for (int i = 0; i < nbltypesL; i++) {
             bw.writeBits(Context.UTF8, 2);
         }
 
-        // NTREESL + optional context map
         if (ntreesL == 1) {
             bw.writeBits(0, 1);
         } else {
@@ -738,7 +800,6 @@ public final class BrotliEncoder {
             ContextMapWriter.write(bw, cmapL, mapLSize, ntreesL);
         }
 
-        // NTREESD + optional context map
         if (ntreesD == 1) {
             bw.writeBits(0, 1);
         } else {
@@ -747,28 +808,70 @@ public final class BrotliEncoder {
         }
 
         // Literal trees
-        HuffmanEncoder.assignLengths(litHist, litLens, 15);
-        HuffmanTable.buildEncodeTables(litLens, litCodes);
-        HuffmanEncoder.writePrefixCode(bw, litHist);
-        if (ntreesL >= 2) {
-            HuffmanEncoder.assignLengths(litHist1, litLens1, 15);
-            HuffmanTable.buildEncodeTables(litLens1, litCodes1);
-            HuffmanEncoder.writePrefixCode(bw, litHist1);
+        int[][] litLensArr = new int[][] { litLens, litLens1, litLens2, litLens3 };
+        int[][] litCodesArr = new int[][] { litCodes, litCodes1, litCodes2, litCodes3 };
+        for (int t = 0; t < ntreesL; t++) {
+            HuffmanEncoder.assignLengths(litBuckets[t], litLensArr[t], 15);
+            HuffmanTable.buildEncodeTables(litLensArr[t], litCodesArr[t]);
+            HuffmanEncoder.writePrefixCode(bw, litBuckets[t]);
         }
 
-        // Insert-and-copy tree
+        // Insert-and-copy trees
         HuffmanEncoder.assignLengths(iacHist, iacLens, 15);
         HuffmanTable.buildEncodeTables(iacLens, iacCodeTbl);
         HuffmanEncoder.writePrefixCode(bw, iacHist);
+        if (nbltypesI >= 2) {
+            HuffmanEncoder.assignLengths(iacHist1, iacLens1, 15);
+            HuffmanTable.buildEncodeTables(iacLens1, iacCodeTbl1);
+            HuffmanEncoder.writePrefixCode(bw, iacHist1);
+        }
 
-        // Distance trees
-        HuffmanEncoder.assignLengths(distHist, distLens, 15);
-        HuffmanTable.buildEncodeTables(distLens, distCodeTbl);
-        HuffmanEncoder.writePrefixCode(bw, distHist);
+        // Distance trees (trim histograms to alphabet for writePrefixCode)
+        int[] distHistWrite = trimHist(distHist, distAlphabet);
+        int[] distLensWrite = new int[distAlphabet];
+        int[] distCodesWrite = new int[distAlphabet];
+        HuffmanEncoder.assignLengths(distHistWrite, distLensWrite, 15);
+        HuffmanTable.buildEncodeTables(distLensWrite, distCodesWrite);
+        HuffmanEncoder.writePrefixCode(bw, distHistWrite);
+        System.arraycopy(distLensWrite, 0, distLens, 0, distAlphabet);
+        System.arraycopy(distCodesWrite, 0, distCodeTbl, 0, distAlphabet);
         if (ntreesD >= 2) {
-            HuffmanEncoder.assignLengths(distHist1, distLens1, 15);
-            HuffmanTable.buildEncodeTables(distLens1, distCodeTbl1);
-            HuffmanEncoder.writePrefixCode(bw, distHist1);
+            int[] distHist1Write = trimHist(distHist1, distAlphabet);
+            int[] distLens1Write = new int[distAlphabet];
+            int[] distCodes1Write = new int[distAlphabet];
+            HuffmanEncoder.assignLengths(distHist1Write, distLens1Write, 15);
+            HuffmanTable.buildEncodeTables(distLens1Write, distCodes1Write);
+            HuffmanEncoder.writePrefixCode(bw, distHist1Write);
+            System.arraycopy(distLens1Write, 0, distLens1, 0, distAlphabet);
+            System.arraycopy(distCodes1Write, 0, distCodeTbl1, 0, distAlphabet);
+        }
+
+        // Rebuild switch tables: writing I overwrote L's tables in the fields
+        if (nbltypesL >= 2) {
+            clearHistogram(btypeHist);
+            btypeHist[1] = 1;
+            HuffmanEncoder.assignLengths(btypeHist, btypeLens, 15);
+            HuffmanTable.buildEncodeTables(btypeLens, btypeCodes);
+            clearHistogram(blenHist);
+            BlockLengthEncoder.pack(firstLitBlockLen, blenPack);
+            blenHist[blenPack[0]]++;
+            BlockLengthEncoder.pack(totalLiterals - firstLitBlockLen, blenPack);
+            blenHist[blenPack[0]]++;
+            HuffmanEncoder.assignLengths(blenHist, blenLens, 15);
+            HuffmanTable.buildEncodeTables(blenLens, blenCodes);
+        }
+        if (nbltypesI >= 2) {
+            clearHistogram(btypeHist);
+            btypeHist[1] = 1;
+            HuffmanEncoder.assignLengths(btypeHist, iBtypeLens, 15);
+            HuffmanTable.buildEncodeTables(iBtypeLens, iBtypeCodes);
+            clearHistogram(blenHist);
+            BlockLengthEncoder.pack(firstIacBlock, blenPack);
+            blenHist[blenPack[0]]++;
+            BlockLengthEncoder.pack(commands.length - firstIacBlock, blenPack);
+            blenHist[blenPack[0]]++;
+            HuffmanEncoder.assignLengths(blenHist, iBlenLens, 15);
+            HuffmanTable.buildEncodeTables(iBlenLens, iBlenCodes);
         }
 
         // --- Commands ---
@@ -776,42 +879,56 @@ public final class BrotliEncoder {
         p2 = 0;
         pos = 0;
         litCount = 0;
-        boolean switched = false;
+        boolean litSwitched = false;
+        boolean iacSwitched = false;
 
         for (int ci = 0; ci < commands.length; ci++) {
             Lz77Encoder.Command cmd = commands[ci];
+
+            if (nbltypesI >= 2 && !iacSwitched && ci == firstIacBlock) {
+                int btLen = iBtypeLens[1];
+                if (btLen > 0) {
+                    bw.writePrefixBits(iBtypeCodes[1], btLen);
+                }
+                BlockLengthEncoder.write(bw, commands.length - firstIacBlock,
+                        iBlenLens, iBlenCodes);
+                iacSwitched = true;
+            }
+
+            boolean useIac1 = nbltypesI >= 2 && ci >= firstIacBlock;
             int code = iacCodes[ci];
-            int len = iacLens[code];
-            if (len > 0) {
-                bw.writePrefixBits(iacCodeTbl[code], len);
+            if (useIac1) {
+                int len = iacLens1[code];
+                if (len > 0) {
+                    bw.writePrefixBits(iacCodeTbl1[code], len);
+                }
+            } else {
+                int len = iacLens[code];
+                if (len > 0) {
+                    bw.writePrefixBits(iacCodeTbl[code], len);
+                }
             }
             bw.writeBits(insertExtras[ci], insertExtraBits[ci]);
             bw.writeBits(copyExtras[ci], copyExtraBits[ci]);
 
             for (int j = 0; j < cmd.insertLen; j++) {
-                if (nbltypesL >= 2 && !switched && litCount == firstBlockLen) {
-                    // Block type symbol 1 = next type
+                if (nbltypesL >= 2 && !litSwitched && litCount == firstLitBlockLen) {
                     int btLen = btypeLens[1];
                     if (btLen > 0) {
                         bw.writePrefixBits(btypeCodes[1], btLen);
                     }
-                    int secondLen = totalLiterals - firstBlockLen;
-                    BlockLengthEncoder.write(bw, secondLen, blenLens, blenCodes);
-                    switched = true;
+                    BlockLengthEncoder.write(bw, totalLiterals - firstLitBlockLen,
+                            blenLens, blenCodes);
+                    litSwitched = true;
                 }
                 int lit = data[cmd.insertOffset + j] & 0xff;
                 int cid = Context.literalContextId(Context.UTF8, p1, p2);
-                int tree = (ntreesL >= 2 && cid >= 32) ? 1 : 0;
-                if (tree == 0) {
-                    int llen = litLens[lit];
-                    if (llen > 0) {
-                        bw.writePrefixBits(litCodes[lit], llen);
-                    }
-                } else {
-                    int llen = litLens1[lit];
-                    if (llen > 0) {
-                        bw.writePrefixBits(litCodes1[lit], llen);
-                    }
+                int tree = litTreeOfContext[cid];
+                int[] lens = litLensArr[tree];
+                int[] codes = litCodesArr[tree];
+                int llen = lens[lit];
+                if (llen > 0) {
+                    bw.writePrefixBits(codes[lit], llen);
                 }
                 p2 = p1;
                 p1 = lit;
@@ -851,6 +968,113 @@ public final class BrotliEncoder {
         }
     }
 
+    private int[] litHistBucket(int bucket) {
+        switch (bucket) {
+            case 0:
+                return litHist;
+            case 1:
+                return litHist1;
+            case 2:
+                return litHist2;
+            default:
+                return litHist3;
+        }
+    }
+
+    private void writeBlockTypeGroupHeader(int nbltypes, int firstLen, int secondLen)
+            throws BrotliException {
+        if (nbltypes == 1) {
+            bw.writeBits(0, 1);
+            return;
+        }
+        ContextMapWriter.writeVarLenUint8PlusOne(bw, nbltypes);
+        clearHistogram(btypeHist);
+        btypeHist[1] = 1;
+        HuffmanEncoder.writePrefixCode(bw, btypeHist);
+        HuffmanEncoder.assignLengths(btypeHist, btypeLens, 15);
+        HuffmanTable.buildEncodeTables(btypeLens, btypeCodes);
+
+        clearHistogram(blenHist);
+        BlockLengthEncoder.pack(firstLen, blenPack);
+        blenHist[blenPack[0]]++;
+        BlockLengthEncoder.pack(secondLen, blenPack);
+        blenHist[blenPack[0]]++;
+        HuffmanEncoder.writePrefixCode(bw, blenHist);
+        HuffmanEncoder.assignLengths(blenHist, blenLens, 15);
+        HuffmanTable.buildEncodeTables(blenLens, blenCodes);
+
+        BlockLengthEncoder.write(bw, firstLen, blenLens, blenCodes);
+    }
+
+    private int[] choosePostfixPair(Lz77Encoder.Command[] commands, int length)
+            throws BrotliException {
+        int nDist = 0;
+        int bytesEmitted = 0;
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            bytesEmitted += cmd.insertLen;
+            boolean insertOnly = (cmd.distance == 0);
+            boolean skipDistance = bytesEmitted >= length;
+            boolean preferImplicit = insertOnly || skipDistance
+                    || (!cmd.dictionary && cmd.distance == distRing.get(0));
+            int copyLen = cmd.copyLen;
+            if (copyLen < 2) {
+                copyLen = 2;
+            }
+            InsertCopyLengths.pack(cmd.insertLen, copyLen, preferImplicit, packOut);
+            boolean implicitDist0 = packOut[0] < 128;
+            if (!skipDistance && !insertOnly && !implicitDist0) {
+                if (nDist < distScratch.length) {
+                    distScratch[nDist++] = cmd.distance;
+                }
+            }
+            if (!skipDistance && !insertOnly) {
+                bytesEmitted += cmd.copyCovered;
+                if (bytesEmitted > length) {
+                    bytesEmitted = length;
+                }
+            }
+        }
+
+        int bestPost = 0;
+        int bestDirect = 0;
+        int bestCost = Integer.MAX_VALUE;
+        for (int i = 0; i < POSTFIX_CANDIDATES.length; i++) {
+            int np = POSTFIX_CANDIDATES[i][0];
+            int nd = POSTFIX_CANDIDATES[i][1];
+            int cost = 0;
+            // Score with the metablock-start ring (no pushes); extra-bit sum only
+            for (int d = 0; d < nDist; d++) {
+                encodeDistance(distScratch[d], np, nd, distRing, distOut);
+                cost += distOut[2];
+            }
+            if (cost < bestCost) {
+                bestCost = cost;
+                bestPost = np;
+                bestDirect = nd;
+            }
+        }
+        return new int[] { bestPost, bestDirect };
+    }
+
+    private static int[] trimHist(int[] hist, int alphabet) {
+        if (hist.length == alphabet) {
+            return hist;
+        }
+        int[] out = new int[alphabet];
+        System.arraycopy(hist, 0, out, 0, alphabet);
+        return out;
+    }
+
+    private static int sumRange(int[] a, int n) {
+        int s = 0;
+        int lim = n < a.length ? n : a.length;
+        for (int i = 0; i < lim; i++) {
+            s += a[i];
+        }
+        return s;
+    }
+
     /**
      * Encodes a backward or dictionary distance with NPOSTFIX=0, NDIRECT=0.
      *
@@ -858,10 +1082,19 @@ public final class BrotliEncoder {
      */
     private static void encodeDistance(int distance, DistanceRing ring, int[] out)
             throws BrotliException {
+        encodeDistance(distance, 0, 0, ring, out);
+    }
+
+    /**
+     * Encodes a backward or dictionary distance.
+     *
+     * @param out {@code out[0]}=code, {@code out[1]}=extra, {@code out[2]}=extraBits
+     */
+    private static void encodeDistance(int distance, int npostfix, int ndirect,
+            DistanceRing ring, int[] out) throws BrotliException {
         if (distance <= 0) {
             throw new BrotliException("Invalid distance " + distance);
         }
-        // Try short codes 0..15 (0 is the last distance)
         for (int c = 0; c < 16; c++) {
             if (ring.resolveShort(c) == distance) {
                 out[0] = c;
@@ -870,20 +1103,29 @@ public final class BrotliEncoder {
                 return;
             }
         }
-        // PrefixEncodeCopyDistance(distance + 15, 0, 0)
-        int distanceCode = distance + 15;
-        if (distanceCode < 16) {
-            out[0] = distanceCode;
+        if (ndirect > 0 && distance <= ndirect) {
+            out[0] = 15 + distance;
             out[1] = 0;
             out[2] = 0;
             return;
         }
-        int dist = 4 + (distanceCode - 16);
+        int rem = distance - ndirect - 1;
+        if (rem < 0) {
+            throw new BrotliException("Invalid distance rem " + distance);
+        }
+        int postfixMask = (1 << npostfix) - 1;
+        int lcode = rem & postfixMask;
+        int prefixBody = rem >> npostfix;
+        int dist = prefixBody + 4;
         int bucket = log2Floor(dist) - 1;
-        int prefix = (dist >> bucket) & 1;
-        int offset = (2 + prefix) << bucket;
+        if (bucket < 1) {
+            bucket = 1;
+        }
+        int bit = (dist >> bucket) & 1;
+        int offset = (2 + bit) << bucket;
         int nbits = bucket;
-        int code = 16 + (2 * (nbits - 1) + prefix);
+        int hcode = 2 * (nbits - 1) + bit;
+        int code = 16 + ndirect + (hcode << npostfix) + lcode;
         int extra = dist - offset;
         out[0] = code;
         out[1] = extra;

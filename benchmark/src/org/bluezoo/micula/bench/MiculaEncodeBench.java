@@ -37,7 +37,7 @@ public class MiculaEncodeBench {
     @State(Scope.Benchmark)
     public static class EncodeState {
 
-        @Param({"1", "2", "3", "4", "5", "6"})
+        @Param({"1", "2", "3", "4", "5", "6", "7", "8"})
         public int quality;
 
         public byte[] plain;
