@@ -18,7 +18,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Encoder tests for qualities 0–4 and API guards.
+ * Encoder tests for qualities 0–6 and API guards.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -53,10 +53,27 @@ public class BrotliEncoderTest {
     }
 
     @Test
-    public void testQuality3And4RoundTrip() throws Exception {
+    public void testQuality3Through6RoundTrip() throws Exception {
         byte[] original = ("the quick brown fox time with that from the time ")
             .getBytes(StandardCharsets.UTF_8);
-        for (int quality = 3; quality <= 4; quality++) {
+        for (int quality = 3; quality <= 6; quality++) {
+            assertArrayEquals("quality " + quality, original,
+                BrotliDecoderTest.decodeAll(encode(original, quality)));
+        }
+    }
+
+    /**
+     * UTF-8 prose for qualities 5–6 (literal context maps / block split).
+     */
+    @Test
+    public void testQuality5And6Utf8Prose() throws Exception {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            sb.append("The quick brown fox jumps over the lazy dog. ");
+            sb.append("Pack my box with five dozen liquor jugs. ");
+        }
+        byte[] original = sb.toString().getBytes(StandardCharsets.UTF_8);
+        for (int quality = 5; quality <= 6; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -72,6 +89,7 @@ public class BrotliEncoderTest {
             .getBytes(StandardCharsets.US_ASCII);
         assertArrayEquals(original, BrotliDecoderTest.decodeAll(encode(original, 2)));
         assertArrayEquals(original, BrotliDecoderTest.decodeAll(encode(original, 4)));
+        assertArrayEquals(original, BrotliDecoderTest.decodeAll(encode(original, 6)));
     }
 
     @Test
@@ -85,10 +103,10 @@ public class BrotliEncoderTest {
     }
 
     @Test
-    public void testSetQuality5Throws() throws Exception {
+    public void testSetQuality7Throws() throws Exception {
         CollectingSink sink = new CollectingSink();
         BrotliEncoder enc = new BrotliEncoder(sink);
-        enc.setQuality(5);
+        enc.setQuality(7);
         try {
             enc.receive(ByteBuffer.wrap(new byte[] { 1 }));
             fail("expected not implemented");
@@ -139,7 +157,7 @@ public class BrotliEncoderTest {
     @Test
     public void testLastDistanceCopyAfterLongInsertIssue1() throws Exception {
         byte[] original = "d with the theith ".getBytes(StandardCharsets.US_ASCII);
-        for (int quality = 1; quality <= 4; quality++) {
+        for (int quality = 1; quality <= 6; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -152,7 +170,7 @@ public class BrotliEncoderTest {
         java.util.Arrays.fill(original, (byte) 0xcd);
         original[0] = (byte) 0xce;
         original[6] = (byte) 0xc0;
-        for (int quality = 1; quality <= 4; quality++) {
+        for (int quality = 1; quality <= 6; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -165,7 +183,7 @@ public class BrotliEncoderTest {
             0x6c, 0x0b, (byte) 0xff, 0x0b, (byte) 0xff, 0x6c, 0x46, (byte) 0xff,
             0x6c, 0x0b, (byte) 0xff, 0x6c, 0x0b, (byte) 0xff
         };
-        for (int quality = 1; quality <= 4; quality++) {
+        for (int quality = 1; quality <= 6; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -180,7 +198,7 @@ public class BrotliEncoderTest {
         for (int i = 0; i < original.length; i++) {
             original[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
         }
-        for (int quality = 1; quality <= 4; quality++) {
+        for (int quality = 1; quality <= 6; quality++) {
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(encode(original, quality)));
         }
@@ -228,7 +246,7 @@ public class BrotliEncoderTest {
                         break;
                 }
             }
-            for (int quality = 1; quality <= 4; quality++) {
+            for (int quality = 1; quality <= 6; quality++) {
                 assertArrayEquals("input " + i + " quality " + quality, d,
                     BrotliDecoderTest.decodeAll(encode(d, quality)));
             }
@@ -243,7 +261,7 @@ public class BrotliEncoderTest {
     @Test
     public void testFourSymbolSimpleCodeLiteralsIssue1() throws Exception {
         byte[] original = "aaeecdee".getBytes(StandardCharsets.US_ASCII);
-        for (int quality = 1; quality <= 4; quality++) {
+        for (int quality = 1; quality <= 6; quality++) {
             byte[] compressed = encode(original, quality);
             assertArrayEquals("quality " + quality, original,
                 BrotliDecoderTest.decodeAll(compressed));
@@ -272,7 +290,7 @@ public class BrotliEncoderTest {
                 }
             }
             byte[] original = sb.toString().getBytes(StandardCharsets.US_ASCII);
-            for (int quality = 1; quality <= 4; quality++) {
+            for (int quality = 1; quality <= 6; quality++) {
                 assertArrayEquals(sb + " quality " + quality, original,
                     BrotliDecoderTest.decodeAll(encode(original, quality)));
             }

@@ -63,7 +63,7 @@ public final class BrotliWriter {
      *
      * @param input uncompressed data (read mode; position advanced)
      * @param sink compressed output
-     * @param quality 0..4
+     * @param quality 0..6
      * @param windowBits WBITS in 10..24
      * @throws BrotliException on failure
      */
@@ -86,7 +86,7 @@ public final class BrotliWriter {
      *
      * @param input uncompressed data
      * @param sink compressed output
-     * @param quality 0..4
+     * @param quality 0..6
      * @throws BrotliException on failure
      */
     public static void write(ByteBuffer input, BrotliSink sink, int quality)

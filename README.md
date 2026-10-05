@@ -41,7 +41,7 @@ decoder.close();
 
 ```java
 BrotliEncoder encoder = new BrotliEncoder(new ChannelBrotliSink(outChannel));
-encoder.setQuality(1);   // 0 = uncompressed; 1–4 = LZ77 + Huffman (2+ dictionary)
+encoder.setQuality(1);   // 0 = uncompressed; 1–6 = LZ77 + Huffman
 encoder.setWindowBits(22);
 encoder.receive(uncompressed);
 encoder.close();

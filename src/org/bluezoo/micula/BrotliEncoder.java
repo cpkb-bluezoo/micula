@@ -26,10 +26,10 @@ import java.nio.ByteBuffer;
 /**
  * Push-model Brotli encoder.
  *
- * <p>Quality 0 emits uncompressed metablocks. Qualities 1–4 use LZ77 with
- * one Huffman tree per alphabet (literals, insert-and-copy, distances).
- * Quality 2+ uses static dictionary matches; quality 3+ deepens the LZ
- * search; quality 4 also matches transformed dictionary words.
+ * <p>Quality 0 emits uncompressed metablocks. Qualities 1–6 use LZ77 with
+ * Huffman coding. Quality 2+ uses the static dictionary; 3+ deepens LZ search;
+ * 4+ matches transformed dictionary words; 5+ uses literal context maps;
+ * 6 adds a literal block split and distance context trees.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -56,16 +56,31 @@ public final class BrotliEncoder {
     private final DistanceRing distRing = new DistanceRing();
 
     private final int[] litHist = new int[256];
+    private final int[] litHist1 = new int[256];
     private final int[] iacHist = new int[704];
     private final int[] distHist = new int[64];
+    private final int[] distHist1 = new int[64];
     private final int[] litLens = new int[256];
+    private final int[] litLens1 = new int[256];
     private final int[] iacLens = new int[704];
     private final int[] distLens = new int[64];
+    private final int[] distLens1 = new int[64];
     private final int[] litCodes = new int[256];
+    private final int[] litCodes1 = new int[256];
     private final int[] iacCodeTbl = new int[704];
     private final int[] distCodeTbl = new int[64];
+    private final int[] distCodeTbl1 = new int[64];
     private final int[] packOut = new int[5];
     private final int[] distOut = new int[3];
+    private final int[] blenPack = new int[3];
+    private final int[] blenHist = new int[26];
+    private final int[] blenLens = new int[26];
+    private final int[] blenCodes = new int[26];
+    private final int[] btypeHist = new int[4];
+    private final int[] btypeLens = new int[4];
+    private final int[] btypeCodes = new int[4];
+    private final int[] cmapL = new int[128];
+    private final int[] cmapD = new int[4];
 
     private int[] iacCodes;
     private int[] insertExtras;
@@ -101,7 +116,7 @@ public final class BrotliEncoder {
     }
 
     /**
-     * Sets compression quality. Accepts 0..11 for API stability; only 0–4
+     * Sets compression quality. Accepts 0..11 for API stability; only 0–6
      * are implemented.
      *
      * @param quality compression quality
@@ -144,7 +159,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 4) {
+        if (quality > 6) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -184,7 +199,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 4) {
+        if (quality > 6) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -206,7 +221,7 @@ public final class BrotliEncoder {
             return;
         }
         ensureHeader();
-        if (quality > 4) {
+        if (quality > 6) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         if (quality == 0) {
@@ -368,6 +383,15 @@ public final class BrotliEncoder {
 
     private void writeCompressedMetablock(byte[] data, int length,
             Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
+        if (quality >= 5) {
+            writeCompressedMetablockContext(data, length, commands, last);
+            return;
+        }
+        writeCompressedMetablockSimple(data, length, commands, last);
+    }
+
+    private void writeCompressedMetablockSimple(byte[] data, int length,
+            Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
         // Header
         bw.writeBits(last ? 1 : 0, 1);
         if (last) {
@@ -422,8 +446,6 @@ public final class BrotliEncoder {
                 copyLen = 2;
             }
             InsertCopyLengths.pack(cmd.insertLen, copyLen, preferImplicit, packOut);
-            // Only symbols below 128 imply distance code 0; long inserts and
-            // copies have no such symbol and need the distance written out.
             boolean implicitDist0 = packOut[0] < 128;
             iacCodes[ci] = packOut[0];
             insertExtras[ci] = packOut[1];
@@ -474,7 +496,6 @@ public final class BrotliEncoder {
         HuffmanEncoder.writePrefixCode(bw, iacHist);
         HuffmanEncoder.writePrefixCode(bw, distHist);
 
-        // Fix NSYM=1: lengths all zero — writePrefixBits with len 0 is fine
         for (int ci = 0; ci < commands.length; ci++) {
             Lz77Encoder.Command cmd = commands[ci];
             int code = iacCodes[ci];
@@ -500,6 +521,332 @@ public final class BrotliEncoder {
                     bw.writePrefixBits(distCodeTbl[dc], dlen);
                 }
                 bw.writeBits(distExtras[ci], distExtraBits[ci]);
+            }
+        }
+    }
+
+    private void writeCompressedMetablockContext(byte[] data, int length,
+            Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
+        boolean useBlockSplit = quality >= 6;
+        boolean useDistTrees = quality >= 6;
+
+        int totalLiterals = 0;
+        for (int ci = 0; ci < commands.length; ci++) {
+            totalLiterals += commands[ci].insertLen;
+        }
+
+        int nbltypesL = 1;
+        int firstBlockLen = totalLiterals;
+        if (useBlockSplit && totalLiterals >= 64) {
+            nbltypesL = 2;
+            firstBlockLen = totalLiterals / 2;
+            if (firstBlockLen < 1) {
+                firstBlockLen = 1;
+            }
+            if (firstBlockLen >= totalLiterals) {
+                firstBlockLen = totalLiterals - 1;
+            }
+        } else {
+            useBlockSplit = false;
+            nbltypesL = 1;
+            firstBlockLen = totalLiterals > 0 ? totalLiterals : 1;
+        }
+
+        // --- Pass 1: IAC / distance codes (same as simple) plus context lit/dist hist
+        clearHistogram(litHist);
+        clearHistogram(litHist1);
+        clearHistogram(iacHist);
+        clearHistogram(distHist);
+        clearHistogram(distHist1);
+        ensureCmdWorkspace(commands.length);
+
+        int p1 = 0;
+        int p2 = 0;
+        int pos = 0;
+        int litCount = 0;
+        int bytesEmitted = 0;
+
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            for (int j = 0; j < cmd.insertLen; j++) {
+                int lit = data[cmd.insertOffset + j] & 0xff;
+                int cid = Context.literalContextId(Context.UTF8, p1, p2);
+                int tree = (cid < 32) ? 0 : 1;
+                if (tree == 0) {
+                    litHist[lit]++;
+                } else {
+                    litHist1[lit]++;
+                }
+                p2 = p1;
+                p1 = lit;
+                litCount++;
+                pos++;
+            }
+            bytesEmitted += cmd.insertLen;
+
+            boolean insertOnly = (cmd.distance == 0);
+            boolean skipDistance = bytesEmitted >= length;
+
+            boolean preferImplicit = false;
+            if (insertOnly || skipDistance) {
+                preferImplicit = true;
+            } else if (!cmd.dictionary && cmd.distance == distRing.get(0)) {
+                preferImplicit = true;
+            }
+
+            int copyLen = cmd.copyLen;
+            if (copyLen < 2) {
+                copyLen = 2;
+            }
+            InsertCopyLengths.pack(cmd.insertLen, copyLen, preferImplicit, packOut);
+            boolean implicitDist0 = packOut[0] < 128;
+            iacCodes[ci] = packOut[0];
+            insertExtras[ci] = packOut[1];
+            copyExtras[ci] = packOut[2];
+            insertExtraBits[ci] = packOut[3];
+            copyExtraBits[ci] = packOut[4];
+            iacHist[iacCodes[ci]]++;
+
+            writeDist[ci] = false;
+            if (!skipDistance && !insertOnly) {
+                writeDist[ci] = !implicitDist0;
+                if (!implicitDist0) {
+                    encodeDistance(cmd.distance, distRing, distOut);
+                    distCodes[ci] = distOut[0];
+                    distExtras[ci] = distOut[1];
+                    distExtraBits[ci] = distOut[2];
+                    int dcid = Context.distanceContextId(copyLen);
+                    if (useDistTrees && dcid > 0) {
+                        distHist1[distCodes[ci]]++;
+                    } else {
+                        distHist[distCodes[ci]]++;
+                    }
+                    if (!cmd.dictionary && distCodes[ci] != 0) {
+                        distRing.push(cmd.distance);
+                    }
+                }
+                for (int j = 0; j < cmd.copyCovered; j++) {
+                    int b = data[pos] & 0xff;
+                    p2 = p1;
+                    p1 = b;
+                    pos++;
+                }
+                bytesEmitted += cmd.copyCovered;
+                if (bytesEmitted > length) {
+                    bytesEmitted = length;
+                }
+            }
+        }
+
+        int ntreesL = 2;
+        if (sum(litHist1) == 0) {
+            ntreesL = 1;
+        }
+        if (sum(litHist) == 0) {
+            if (ntreesL == 2) {
+                // Swap: only tree 1 has symbols
+                System.arraycopy(litHist1, 0, litHist, 0, 256);
+                clearHistogram(litHist1);
+                ntreesL = 1;
+            } else {
+                litHist[0] = 1;
+            }
+        }
+
+        int ntreesD = 1;
+        if (useDistTrees && sum(distHist1) > 0 && sum(distHist) > 0) {
+            ntreesD = 2;
+        } else if (useDistTrees && sum(distHist1) > 0) {
+            System.arraycopy(distHist1, 0, distHist, 0, 64);
+            clearHistogram(distHist1);
+            ntreesD = 1;
+        }
+        if (sum(distHist) == 0) {
+            distHist[0] = 1;
+        }
+        if (sum(iacHist) == 0) {
+            iacHist[0] = 1;
+        }
+
+        // Context maps
+        int mapLSize = 64 * nbltypesL;
+        for (int bt = 0; bt < nbltypesL; bt++) {
+            for (int cid = 0; cid < 64; cid++) {
+                int tree = (ntreesL >= 2 && cid >= 32) ? 1 : 0;
+                cmapL[64 * bt + cid] = tree;
+            }
+        }
+        cmapD[0] = 0;
+        cmapD[1] = (ntreesD >= 2) ? 1 : 0;
+        cmapD[2] = (ntreesD >= 2) ? 1 : 0;
+        cmapD[3] = (ntreesD >= 2) ? 1 : 0;
+
+        // --- Header ---
+        bw.writeBits(last ? 1 : 0, 1);
+        if (last) {
+            bw.writeBits(0, 1);
+        }
+        writeMlen(length);
+        if (!last) {
+            bw.writeBits(0, 1);
+        }
+
+        // NBLTYPESL
+        if (nbltypesL == 1) {
+            bw.writeBits(0, 1);
+        } else {
+            ContextMapWriter.writeVarLenUint8PlusOne(bw, nbltypesL);
+            // Block-type tree: only symbol 1 (next type) is used at the switch
+            clearHistogram(btypeHist);
+            btypeHist[1] = 1;
+            HuffmanEncoder.writePrefixCode(bw, btypeHist);
+            HuffmanEncoder.assignLengths(btypeHist, btypeLens, 15);
+            HuffmanTable.buildEncodeTables(btypeLens, btypeCodes);
+
+            // Block-length tree from the two lengths we emit
+            clearHistogram(blenHist);
+            BlockLengthEncoder.pack(firstBlockLen, blenPack);
+            blenHist[blenPack[0]]++;
+            int secondLen = totalLiterals - firstBlockLen;
+            BlockLengthEncoder.pack(secondLen, blenPack);
+            blenHist[blenPack[0]]++;
+            HuffmanEncoder.writePrefixCode(bw, blenHist);
+            HuffmanEncoder.assignLengths(blenHist, blenLens, 15);
+            HuffmanTable.buildEncodeTables(blenLens, blenCodes);
+
+            BlockLengthEncoder.write(bw, firstBlockLen, blenLens, blenCodes);
+        }
+
+        // NBLTYPESI = 1, NBLTYPESD = 1
+        bw.writeBits(0, 1);
+        bw.writeBits(0, 1);
+
+        // NPOSTFIX=0, NDIRECT=0
+        bw.writeBits(0, 2);
+        bw.writeBits(0, 4);
+
+        // Context modes: UTF8 for each literal block type
+        for (int i = 0; i < nbltypesL; i++) {
+            bw.writeBits(Context.UTF8, 2);
+        }
+
+        // NTREESL + optional context map
+        if (ntreesL == 1) {
+            bw.writeBits(0, 1);
+        } else {
+            ContextMapWriter.writeVarLenUint8PlusOne(bw, ntreesL);
+            ContextMapWriter.write(bw, cmapL, mapLSize, ntreesL);
+        }
+
+        // NTREESD + optional context map
+        if (ntreesD == 1) {
+            bw.writeBits(0, 1);
+        } else {
+            ContextMapWriter.writeVarLenUint8PlusOne(bw, ntreesD);
+            ContextMapWriter.write(bw, cmapD, 4, ntreesD);
+        }
+
+        // Literal trees
+        HuffmanEncoder.assignLengths(litHist, litLens, 15);
+        HuffmanTable.buildEncodeTables(litLens, litCodes);
+        HuffmanEncoder.writePrefixCode(bw, litHist);
+        if (ntreesL >= 2) {
+            HuffmanEncoder.assignLengths(litHist1, litLens1, 15);
+            HuffmanTable.buildEncodeTables(litLens1, litCodes1);
+            HuffmanEncoder.writePrefixCode(bw, litHist1);
+        }
+
+        // Insert-and-copy tree
+        HuffmanEncoder.assignLengths(iacHist, iacLens, 15);
+        HuffmanTable.buildEncodeTables(iacLens, iacCodeTbl);
+        HuffmanEncoder.writePrefixCode(bw, iacHist);
+
+        // Distance trees
+        HuffmanEncoder.assignLengths(distHist, distLens, 15);
+        HuffmanTable.buildEncodeTables(distLens, distCodeTbl);
+        HuffmanEncoder.writePrefixCode(bw, distHist);
+        if (ntreesD >= 2) {
+            HuffmanEncoder.assignLengths(distHist1, distLens1, 15);
+            HuffmanTable.buildEncodeTables(distLens1, distCodeTbl1);
+            HuffmanEncoder.writePrefixCode(bw, distHist1);
+        }
+
+        // --- Commands ---
+        p1 = 0;
+        p2 = 0;
+        pos = 0;
+        litCount = 0;
+        boolean switched = false;
+
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            int code = iacCodes[ci];
+            int len = iacLens[code];
+            if (len > 0) {
+                bw.writePrefixBits(iacCodeTbl[code], len);
+            }
+            bw.writeBits(insertExtras[ci], insertExtraBits[ci]);
+            bw.writeBits(copyExtras[ci], copyExtraBits[ci]);
+
+            for (int j = 0; j < cmd.insertLen; j++) {
+                if (nbltypesL >= 2 && !switched && litCount == firstBlockLen) {
+                    // Block type symbol 1 = next type
+                    int btLen = btypeLens[1];
+                    if (btLen > 0) {
+                        bw.writePrefixBits(btypeCodes[1], btLen);
+                    }
+                    int secondLen = totalLiterals - firstBlockLen;
+                    BlockLengthEncoder.write(bw, secondLen, blenLens, blenCodes);
+                    switched = true;
+                }
+                int lit = data[cmd.insertOffset + j] & 0xff;
+                int cid = Context.literalContextId(Context.UTF8, p1, p2);
+                int tree = (ntreesL >= 2 && cid >= 32) ? 1 : 0;
+                if (tree == 0) {
+                    int llen = litLens[lit];
+                    if (llen > 0) {
+                        bw.writePrefixBits(litCodes[lit], llen);
+                    }
+                } else {
+                    int llen = litLens1[lit];
+                    if (llen > 0) {
+                        bw.writePrefixBits(litCodes1[lit], llen);
+                    }
+                }
+                p2 = p1;
+                p1 = lit;
+                litCount++;
+                pos++;
+            }
+
+            if (writeDist[ci]) {
+                int dc = distCodes[ci];
+                int copyLenWire = cmd.copyLen;
+                if (copyLenWire < 2) {
+                    copyLenWire = 2;
+                }
+                int dcid = Context.distanceContextId(copyLenWire);
+                if (ntreesD >= 2 && dcid > 0) {
+                    int dlen = distLens1[dc];
+                    if (dlen > 0) {
+                        bw.writePrefixBits(distCodeTbl1[dc], dlen);
+                    }
+                } else {
+                    int dlen = distLens[dc];
+                    if (dlen > 0) {
+                        bw.writePrefixBits(distCodeTbl[dc], dlen);
+                    }
+                }
+                bw.writeBits(distExtras[ci], distExtraBits[ci]);
+            }
+
+            if (cmd.distance != 0 || cmd.copyCovered > 0) {
+                for (int j = 0; j < cmd.copyCovered; j++) {
+                    int b = data[pos] & 0xff;
+                    p2 = p1;
+                    p1 = b;
+                    pos++;
+                }
             }
         }
     }

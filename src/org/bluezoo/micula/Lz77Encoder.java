@@ -62,6 +62,8 @@ final class Lz77Encoder {
                 case 3:
                     return new MatchMode(4, true, true, false);
                 case 4:
+                case 5:
+                case 6:
                     return new MatchMode(16, true, true, true);
                 default:
                     throw new IllegalArgumentException("LZ77 quality " + quality);
