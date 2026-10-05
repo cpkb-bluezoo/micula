@@ -20,6 +20,9 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Install reference brotli CLI
+        run: sudo apt-get update && sudo apt-get install -y brotli
+
       - name: Run unit tests
         run: ant clean junit-test
 

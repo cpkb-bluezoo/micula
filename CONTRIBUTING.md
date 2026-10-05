@@ -11,6 +11,12 @@ Run the unit tests:
 ant test
 ```
 
+`GoogleBrotliInteropTest` encodes with micula and decompresses with the
+reference Google `brotli` CLI for qualities 0–8. Install `brotli` on your
+`PATH` (or set `BROTLI` / `-Dbrotli.cli=...`) so those tests run locally;
+without the CLI they are skipped. CI installs the package and always runs
+them.
+
 JMH throughput benchmarks (see [benchmark/README.md](benchmark/README.md)):
 
 ```bash
