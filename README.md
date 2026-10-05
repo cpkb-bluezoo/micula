@@ -71,4 +71,4 @@ add the repository and authenticate (for example `GITHUB_TOKEN` with
 
 ## License
 
-GNU Lesser General Public License version 2.1 (see [LICENSE](LICENSE)).
+GNU Lesser General Public License version 3 (see [LICENSE](LICENSE)).

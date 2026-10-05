@@ -7,7 +7,7 @@
  *
  * micula is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation; either version 2.1 of the License, or
+ * the Free Software Foundation; either version 3 of the License, or
  * (at your option) any later version.
  *
  * micula is distributed in the hope that it will be useful,
@@ -74,7 +74,7 @@ public class GenerateDictionary {
         sb.append(" *\n");
         sb.append(" * micula is free software: you can redistribute it and/or modify\n");
         sb.append(" * it under the terms of the GNU Lesser General Public License as published by\n");
-        sb.append(" * the Free Software Foundation; either version 2.1 of the License, or\n");
+        sb.append(" * the Free Software Foundation; either version 3 of the License, or\n");
         sb.append(" * (at your option) any later version.\n");
         sb.append(" */\n");
         sb.append("\n");
