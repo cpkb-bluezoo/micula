@@ -12,7 +12,7 @@ ant test
 ```
 
 `GoogleBrotliInteropTest` encodes with micula and decompresses with the
-reference Google `brotli` CLI for qualities 0–9. Install `brotli` on your
+reference Google `brotli` CLI for qualities 0–10. Install `brotli` on your
 `PATH` (or set `BROTLI` / `-Dbrotli.cli=...`) so those tests run locally;
 without the CLI they are skipped. CI installs the package and always runs
 them.
