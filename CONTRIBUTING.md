@@ -34,6 +34,21 @@ ant jmh-baseline # refresh benchmark/baseline/ (use JDK 21)
 4. Submit a pull request with a clear description of the change
 5. Address any review feedback
 
+## Releasing
+
+Versions live in `build.xml` (`release` property) and `pom.xml` (`<version>`);
+keep them equal. Record user-visible changes in [ChangeLog](ChangeLog).
+
+Publishing is handled by `.github/workflows/release-to-maven-central.yml`,
+which runs `scripts/publish-to-central.sh` (Maven Central via the Publisher
+API, then GitHub Packages when `GITHUB_TOKEN` is set). Trigger it by
+publishing a GitHub Release whose tag matches the version (for example
+`v1.1.0`), or via workflow_dispatch on the release commit.
+
+Required repository secrets: `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`,
+`CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`. `GITHUB_TOKEN` is
+provided by Actions for Packages.
+
 ---
 
 # Micula Coding Standards

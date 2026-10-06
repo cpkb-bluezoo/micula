@@ -45,6 +45,7 @@ jobs:
             <ul>
               <li><a href="doc/">API Documentation (Javadoc)</a></li>
               <li><a href="https://github.com/cpkb-bluezoo/micula/blob/main/README.md">README</a></li>
+              <li><a href="https://github.com/cpkb-bluezoo/micula/blob/main/ChangeLog">ChangeLog</a></li>
             </ul>
           </body></html>
           HTML

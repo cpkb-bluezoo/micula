@@ -15,6 +15,7 @@ format.
   reconstructed output and optional LZ77 command events through a handler
 - **Incremental** — chunk-invariant decoding; resume mid-symbol across
   buffer boundaries
+- **Encoder qualities 0–11** — uncompressed through Zopfli HQ (second pass)
 - **RFC 7932** — raw Brotli streams (not Google’s large-window extensions)
 
 ## Decoding
@@ -58,12 +59,21 @@ Requires JDK 21+.
 
 ## Maven dependency
 
+```xml
+<dependency>
+  <groupId>org.bluezoo</groupId>
+  <artifactId>micula</artifactId>
+  <version>1.1.0</version>
+</dependency>
+```
+
 Releases are published to [Maven Central](https://central.sonatype.com/)
-(`org.bluezoo:micula`) and
-[GitHub Packages](https://github.com/cpkb-bluezoo/micula/packages)
+and [GitHub Packages](https://github.com/cpkb-bluezoo/micula/packages)
 (`https://maven.pkg.github.com/cpkb-bluezoo/micula`). For GitHub Packages,
 add the repository and authenticate (for example `GITHUB_TOKEN` with
 `read:packages`).
+
+See [ChangeLog](ChangeLog) for release history.
 
 ## Documentation
 

@@ -1,0 +1,62 @@
+micula ChangeLog
+================
+
+Version 1.1.0 (2026-10-06)
+--------------------------
+
+Feature release: encoder qualities 0–11 are implemented end-to-end.
+
+### Added
+
+- Encoder qualities 3–11: deeper LZ77 search, static dictionary (identity and
+  transforms), literal context maps, block splits, NPOSTFIX/NDIRECT tuning,
+  larger metablocks, and Zopfli command selection (quality 10 one pass;
+  quality 11 second pass with refined costs and shorter length samples).
+- Google `brotli` CLI interop tests (micula encode, reference decode) for
+  qualities 0–11.
+- Ant JMH benchmarks for encode and decode throughput
+  (`ant jmh`, `ant jmh-smoke`, `ant jmh-baseline`).
+
+### Changed
+
+- Relicensed under the GNU Lesser General Public License version 3.
+
+### Performance
+
+- Encode/decode speedups on the quality 0–2 paths retained from earlier work
+  on this branch line.
+
+Version 1.0.1 (2026-09-21)
+--------------------------
+
+Bug-fix release for Brotli encoding at quality 1 and 2. Decoding and
+quality 0 are unchanged.
+
+### Fixed
+
+- Simple prefix codes (4 symbols): when the length-1 symbol was not first in
+  sorted order, symbols could be written in the wrong order for tree-select 0
+  ([#1](https://github.com/cpkb-bluezoo/micula/issues/1)).
+- Insert-and-copy / distance: “copy at last distance” is only implicit for
+  short insert/copy combinations; longer commands now emit an explicit
+  distance when required by RFC 7932.
+- Complex Huffman metadata: code-length trees are built as a balanced
+  complete code (previously some symbol counts used invalid length-5 fillers).
+
+### Tests
+
+- Regression coverage for the reported reproducer, a certificate fragment,
+  all four-symbol orderings, complex prefix codes, and seeded random
+  round-trips at qualities 1 and 2.
+
+Version 1.0.0 (2026-09-16)
+--------------------------
+
+Initial stable release of Micula, a pure-Java encoder and decoder for the
+RFC 7932 Brotli compressed data format.
+
+- Pure Java (no JNI); NIO-first (`ByteBuffer`); event-driven
+  `receive` / handler API; incremental, chunk-invariant decoding.
+- Encoder qualities 0–2 (uncompressed metablocks through LZ77 + Huffman).
+- Maven Central and GitHub Packages coordinates `org.bluezoo:micula`.
+- Requires JDK 21 or later.

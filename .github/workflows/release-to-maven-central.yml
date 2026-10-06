@@ -36,8 +36,11 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Install Maven
-        run: sudo apt-get update && sudo apt-get install -y maven
+      - name: Install Maven and reference brotli CLI
+        run: sudo apt-get update && sudo apt-get install -y maven brotli
+
+      - name: Run unit tests
+        run: ant clean junit-test
 
       - name: Import GPG key
         id: gpg
