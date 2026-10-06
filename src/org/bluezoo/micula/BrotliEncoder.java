@@ -26,13 +26,14 @@ import java.nio.ByteBuffer;
 /**
  * Push-model Brotli encoder.
  *
- * <p>Quality 0 emits uncompressed metablocks. Qualities 1–10 use LZ77 with
+ * <p>Quality 0 emits uncompressed metablocks. Qualities 1–11 use LZ77 with
  * Huffman coding. Quality 2+ uses the static dictionary; 3+ deepens LZ search;
  * 4+ matches transformed dictionary words; 5+ uses literal context maps;
  * 6 adds a literal block split and distance context trees; 7 tunes
  * NPOSTFIX/NDIRECT; 8 uses up to four literal trees and an insert-and-copy
  * block split; 9 uses larger metablocks and a distance block split; 10 uses
- * Zopfli command selection with bounded block splits and context clustering.
+ * Zopfli command selection with bounded block splits and context clustering;
+ * 11 adds a second Zopfli pass with refined costs and shorter length samples.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -41,6 +42,13 @@ public final class BrotliEncoder {
     private static final int MAX_METABLOCK = 1 << 24;
     private static final int DEFAULT_BLOCK = 1 << 16;
     private static final int QUALITY9_BLOCK = 1 << 18;
+    private static final int MAX_LIT_BLOCK_TYPES = 16;
+    private static final int MAX_IAC_BLOCK_TYPES = 8;
+    private static final int MAX_DIST_BLOCK_TYPES = 8;
+    private static final int MAX_LIT_TREES = 16;
+    private static final int MAX_DIST_SLOTS = MAX_DIST_BLOCK_TYPES * 2;
+    private static final int MAX_CTX_SLOTS = 64 * MAX_LIT_BLOCK_TYPES;
+    private static final int MAX_BTYPE_ALPHABET = MAX_LIT_BLOCK_TYPES + 2;
 
     private static final int MAX_DIST_ALPHABET = 256;
     private static final int[][] POSTFIX_CANDIDATES = {
@@ -103,33 +111,33 @@ public final class BrotliEncoder {
     private final int[] blenHist = new int[26];
     private final int[] blenLens = new int[26];
     private final int[] blenCodes = new int[26];
-    private final int[] btypeHist = new int[10];
-    private final int[] btypeLens = new int[10];
-    private final int[] btypeCodes = new int[10];
-    private final int[] cmapL = new int[512];
-    private final int[] cmapD = new int[16];
+    private final int[] btypeHist = new int[MAX_BTYPE_ALPHABET];
+    private final int[] btypeLens = new int[MAX_BTYPE_ALPHABET];
+    private final int[] btypeCodes = new int[MAX_BTYPE_ALPHABET];
+    private final int[] cmapL = new int[MAX_CTX_SLOTS];
+    private final int[] cmapD = new int[4 * MAX_DIST_BLOCK_TYPES];
     private final int[] litTreeOfContext = new int[64];
     private final int[] distScratch = new int[4096];
-    private final int[] iBtypeLens = new int[10];
-    private final int[] iBtypeCodes = new int[10];
+    private final int[] iBtypeLens = new int[MAX_BTYPE_ALPHABET];
+    private final int[] iBtypeCodes = new int[MAX_BTYPE_ALPHABET];
     private final int[] iBlenLens = new int[26];
     private final int[] iBlenCodes = new int[26];
-    private final int[] dBtypeLens = new int[10];
-    private final int[] dBtypeCodes = new int[10];
+    private final int[] dBtypeLens = new int[MAX_BTYPE_ALPHABET];
+    private final int[] dBtypeCodes = new int[MAX_BTYPE_ALPHABET];
     private final int[] dBlenLens = new int[26];
     private final int[] dBlenCodes = new int[26];
-    private final int[] distSlotToTree = new int[8];
-    private final int[][] litHistsHq = new int[8][256];
-    private final int[][] litLensHq = new int[8][256];
-    private final int[][] litCodesHq = new int[8][256];
-    private final int[][] iacHistsHq = new int[4][704];
-    private final int[][] iacLensHq = new int[4][704];
-    private final int[][] iacCodesHq = new int[4][704];
-    private final int[][] distHistsHq = new int[8][MAX_DIST_ALPHABET];
-    private final int[][] distLensHq = new int[8][MAX_DIST_ALPHABET];
-    private final int[][] distCodesHq = new int[8][MAX_DIST_ALPHABET];
-    private final int[][] ctxHists = new int[512][256];
-    private final int[] ctxMapScratch = new int[512];
+    private final int[] distSlotToTree = new int[MAX_DIST_SLOTS];
+    private final int[][] litHistsHq = new int[MAX_LIT_TREES][256];
+    private final int[][] litLensHq = new int[MAX_LIT_TREES][256];
+    private final int[][] litCodesHq = new int[MAX_LIT_TREES][256];
+    private final int[][] iacHistsHq = new int[MAX_IAC_BLOCK_TYPES][704];
+    private final int[][] iacLensHq = new int[MAX_IAC_BLOCK_TYPES][704];
+    private final int[][] iacCodesHq = new int[MAX_IAC_BLOCK_TYPES][704];
+    private final int[][] distHistsHq = new int[MAX_DIST_SLOTS][MAX_DIST_ALPHABET];
+    private final int[][] distLensHq = new int[MAX_DIST_SLOTS][MAX_DIST_ALPHABET];
+    private final int[][] distCodesHq = new int[MAX_DIST_SLOTS][MAX_DIST_ALPHABET];
+    private final int[][] ctxHists = new int[MAX_CTX_SLOTS][256];
+    private final int[] ctxMapScratch = new int[MAX_CTX_SLOTS];
 
     private int[] iacCodes;
     private int[] insertExtras;
@@ -166,8 +174,7 @@ public final class BrotliEncoder {
     }
 
     /**
-     * Sets compression quality. Accepts 0..11 for API stability; only 0–10
-     * are implemented.
+     * Sets compression quality. Accepts 0..11.
      *
      * @param quality compression quality
      */
@@ -209,9 +216,6 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 10) {
-            throw new BrotliException("Quality " + quality + " not implemented");
-        }
         ensureHeader();
         if (quality == 0) {
             while (data.hasRemaining()) {
@@ -250,9 +254,6 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 10) {
-            throw new BrotliException("Quality " + quality + " not implemented");
-        }
         ensureHeader();
         if (quality == 0) {
             return;
@@ -272,9 +273,6 @@ public final class BrotliEncoder {
             return;
         }
         ensureHeader();
-        if (quality > 10) {
-            throw new BrotliException("Quality " + quality + " not implemented");
-        }
         if (quality == 0) {
             bw.writeBits(1, 1);
             bw.writeBits(1, 1);
@@ -414,7 +412,7 @@ public final class BrotliEncoder {
         Lz77Encoder.Command[][] box = new Lz77Encoder.Command[1][];
         if (mode.zopfli) {
             ZopfliParser.encode(pending, length, history, historyLen, windowSize,
-                    distRing, box);
+                    distRing, quality, box);
         } else {
             Lz77Encoder.encode(pending, length, history, historyLen, windowSize,
                     mode, box);
@@ -625,11 +623,13 @@ public final class BrotliEncoder {
         int distAlphabet = 16 + ndirect + (48 << npostfix);
 
         ensureCmdWorkspace(commands.length);
-        for (int t = 0; t < 8; t++) {
+        for (int t = 0; t < MAX_LIT_TREES; t++) {
             clearHistogram(litHistsHq[t]);
+        }
+        for (int t = 0; t < MAX_DIST_SLOTS; t++) {
             clearHistogram(distHistsHq[t]);
         }
-        for (int t = 0; t < 4; t++) {
+        for (int t = 0; t < MAX_IAC_BLOCK_TYPES; t++) {
             clearHistogram(iacHistsHq[t]);
         }
 
@@ -695,16 +695,25 @@ public final class BrotliEncoder {
             }
         }
 
-        // Literal block lengths
-        int[] litBlockLens = splitByteStream(litStream, totalLiterals, 1024, 8, 256);
+        // Literal / IAC / distance block lengths (quality 11 uses finer splits)
+        int litChunk = quality >= 11 ? 512 : 1024;
+        int litCap = quality >= 11 ? 16 : 8;
+        int iacChunk = quality >= 11 ? 16 : 32;
+        int iacCap = quality >= 11 ? 8 : 4;
+        int distChunk = quality >= 11 ? 16 : 32;
+        int distCap = quality >= 11 ? 8 : 4;
+        int litTreeCap = quality >= 11 ? 16 : 8;
+
+        int[] litBlockLens = splitByteStream(litStream, totalLiterals, litChunk,
+                litCap, 256);
         int nbltypesL = litBlockLens.length;
 
-        // IAC block lengths (chunks of 32 commands, alphabet = insert length code)
-        int[] iacBlockLens = splitCommands(commands, 32, 4);
+        // IAC block lengths (alphabet = insert length code)
+        int[] iacBlockLens = splitCommands(commands, iacChunk, iacCap);
         int nbltypesI = iacBlockLens.length;
 
         // Distance block lengths
-        int[] distBlockLens = splitDistances(totalExplicitDist, 32, 4);
+        int[] distBlockLens = splitDistances(totalExplicitDist, distChunk, distCap);
         int nbltypesD = distBlockLens.length;
 
         // Assign IAC histograms by block
@@ -722,7 +731,7 @@ public final class BrotliEncoder {
             }
         }
 
-        // Context clustering: 64 contexts × nbltypesL, then cluster to 8 trees
+        // Context clustering: 64 contexts x nbltypesL, then cluster to litTreeCap trees
         int nCtxSlots = 64 * nbltypesL;
         for (int i = 0; i < nCtxSlots; i++) {
             clearHistogram(ctxHists[i]);
@@ -758,7 +767,8 @@ public final class BrotliEncoder {
             }
         }
 
-        int ntreesL = BlockSplitter.clusterContexts(ctxHists, nCtxSlots, 8, ctxMapScratch);
+        int ntreesL = BlockSplitter.clusterContexts(ctxHists, nCtxSlots, litTreeCap,
+                ctxMapScratch);
         // Copy clustered tree histograms into litHistsHq
         for (int t = 0; t < ntreesL; t++) {
             System.arraycopy(ctxHists[t], 0, litHistsHq[t], 0, 256);
@@ -773,7 +783,7 @@ public final class BrotliEncoder {
         }
 
         // Distance histograms by block × context
-        for (int t = 0; t < 8; t++) {
+        for (int t = 0; t < MAX_DIST_SLOTS; t++) {
             clearHistogram(distHistsHq[t]);
         }
         int distIdx = 0;

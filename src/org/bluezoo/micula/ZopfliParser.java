@@ -22,9 +22,10 @@
 package org.bluezoo.micula;
 
 /**
- * Single-pass Zopfli-style shortest path over multi-match candidates for
- * quality 10. Emits the same {@link Lz77Encoder.Command} objects the rest of
- * the encoder already writes.
+ * Zopfli-style shortest path over multi-match candidates for qualities 10–11.
+ * Quality 10 is a single pass with rough costs. Quality 11 reruns with refined
+ * costs and a few shorter LZ lengths. Emits the same
+ * {@link Lz77Encoder.Command} objects the rest of the encoder already writes.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -39,6 +40,8 @@ final class ZopfliParser {
     private static final int FLAT_COMMAND_BITS = 4;
     private static final int MILLIBITS = 1000;
     private static final long INF = Long.MAX_VALUE / 4;
+    private static final int MAX_ZOPFLI_LEN_Q11 = 325;
+    private static final int SHORT_LENGTH_SAMPLES = 4;
 
     private ZopfliParser() {
     }
@@ -47,10 +50,12 @@ final class ZopfliParser {
      * Parses {@code block[0..blockLen)} into commands using a millibit
      * shortest path. {@code distRing} is the metablock-start ring and is not
      * modified.
+     *
+     * @param quality 10 (one pass) or 11 (two passes)
      */
     static int encode(byte[] block, int blockLen,
             byte[] history, int historyLen,
-            int windowSize, DistanceRing distRing,
+            int windowSize, DistanceRing distRing, int quality,
             Lz77Encoder.Command[][] outCommands) throws BrotliException {
         if (blockLen <= 0) {
             outCommands[0] = new Lz77Encoder.Command[0];
@@ -63,8 +68,44 @@ final class ZopfliParser {
         }
         int histStart = historyLen - histUse;
 
-        int[] litCost = buildLiteralCosts(block, blockLen);
+        int[] litCost = buildLiteralCostsFromBlock(block, blockLen);
+        int[] cmdCost = null;
+        int[] distCost = null;
+        boolean shortLengths = false;
 
+        // Pass 1
+        shortestPath(block, blockLen, history, histStart, histUse, windowSize,
+                distRing, litCost, cmdCost, distCost, shortLengths, outCommands);
+
+        if (quality < 11) {
+            return outCommands[0].length;
+        }
+
+        // Refine costs from pass-1 commands and rerun
+        CostTables tables = buildCostTables(block, outCommands[0], distRing);
+        shortestPath(block, blockLen, history, histStart, histUse, windowSize,
+                distRing, tables.litCost, tables.cmdCost, tables.distCost,
+                true, outCommands);
+        return outCommands[0].length;
+    }
+
+    private static final class CostTables {
+        final int[] litCost;
+        final int[] cmdCost;
+        final int[] distCost;
+
+        CostTables(int[] litCost, int[] cmdCost, int[] distCost) {
+            this.litCost = litCost;
+            this.cmdCost = cmdCost;
+            this.distCost = distCost;
+        }
+    }
+
+    private static void shortestPath(byte[] block, int blockLen,
+            byte[] history, int histStart, int histUse, int windowSize,
+            DistanceRing distRing, int[] litCost, int[] cmdCost, int[] distCost,
+            boolean shortLengths, Lz77Encoder.Command[][] outCommands)
+            throws BrotliException {
         int[] hashHead = new int[HASH_SIZE];
         for (int i = 0; i < HASH_SIZE; i++) {
             hashHead[i] = -1;
@@ -103,13 +144,13 @@ final class ZopfliParser {
         int[] dictCoveredOut = new int[1];
         int[] dictTransformOut = new int[1];
         int[] dictIndexOut = new int[1];
+        int[] shortLens = new int[SHORT_LENGTH_SAMPLES + 1];
 
         for (int pos = 0; pos < blockLen; pos++) {
             if (cost[pos] >= INF) {
                 continue;
             }
 
-            // Literal edge
             long lit = cost[pos] + litCost[block[pos] & 0xff];
             if (lit < cost[pos + 1]) {
                 cost[pos + 1] = lit;
@@ -127,24 +168,37 @@ final class ZopfliParser {
 
             for (int m = 0; m < nMatches; m++) {
                 int covered = matchLen[m];
-                int to = pos + covered;
-                if (to > blockLen) {
-                    continue;
-                }
                 int wireLen = matchWire[m];
                 if (wireLen < 2) {
                     wireLen = 2;
                 }
-                long matchCost = cost[pos]
-                        + commandMillibits(0, wireLen, matchDist[m], distRing,
-                                distOut, packOut);
-                if (matchCost < cost[to]) {
-                    cost[to] = matchCost;
-                    prev[to] = pos;
-                    edgeLen[to] = covered;
-                    edgeDist[to] = matchDist[m];
-                    edgeWire[to] = matchWire[m];
-                    edgeDict[to] = matchDict[m];
+                boolean dict = matchDict[m];
+                int nLens = 1;
+                shortLens[0] = covered;
+                if (shortLengths && !dict && covered > MIN_MATCH) {
+                    nLens = fillShortLengths(covered, shortLens);
+                }
+                for (int li = 0; li < nLens; li++) {
+                    int len = shortLens[li];
+                    int to = pos + len;
+                    if (to > blockLen) {
+                        continue;
+                    }
+                    int wire = dict ? wireLen : len;
+                    if (wire < 2) {
+                        wire = 2;
+                    }
+                    long matchCost = cost[pos]
+                            + commandMillibits(0, wire, matchDist[m], distRing,
+                                    distOut, packOut, cmdCost, distCost);
+                    if (matchCost < cost[to]) {
+                        cost[to] = matchCost;
+                        prev[to] = pos;
+                        edgeLen[to] = len;
+                        edgeDist[to] = matchDist[m];
+                        edgeWire[to] = wire;
+                        edgeDict[to] = dict;
+                    }
                 }
             }
 
@@ -153,32 +207,132 @@ final class ZopfliParser {
             }
         }
 
-        return traceCommands(blockLen, prev, edgeLen, edgeDist, edgeWire,
-                edgeDict, outCommands);
+        traceCommands(blockLen, prev, edgeLen, edgeDist, edgeWire, edgeDict,
+                outCommands);
+    }
+
+    /**
+     * Fills {@code out} with the full length plus up to
+     * {@link #SHORT_LENGTH_SAMPLES} shorter samples in
+     * {@code [MIN_MATCH, min(full, MAX_ZOPFLI_LEN_Q11)]}. Returns count.
+     * {@code out[0]} is always the full length.
+     */
+    private static int fillShortLengths(int full, int[] out) {
+        out[0] = full;
+        int maxShort = full;
+        if (maxShort > MAX_ZOPFLI_LEN_Q11) {
+            maxShort = MAX_ZOPFLI_LEN_Q11;
+        }
+        if (maxShort <= MIN_MATCH) {
+            return 1;
+        }
+        int n = 1;
+        for (int i = 1; i <= SHORT_LENGTH_SAMPLES; i++) {
+            // Spread samples across [4, maxShort]
+            int len = MIN_MATCH
+                    + ((maxShort - MIN_MATCH) * i) / (SHORT_LENGTH_SAMPLES + 1);
+            if (len < MIN_MATCH) {
+                len = MIN_MATCH;
+            }
+            if (len >= full) {
+                continue;
+            }
+            boolean dup = false;
+            for (int j = 0; j < n; j++) {
+                if (out[j] == len) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                out[n++] = len;
+            }
+        }
+        return n;
     }
 
     private static long commandMillibits(int insertLen, int copyLen, int distance,
-            DistanceRing ring, int[] distOut, int[] packOut) throws BrotliException {
+            DistanceRing ring, int[] distOut, int[] packOut,
+            int[] cmdCost, int[] distCostTbl) throws BrotliException {
         InsertCopyLengths.pack(insertLen, copyLen, false, packOut);
-        long bits = FLAT_COMMAND_BITS + packOut[3] + packOut[4];
-        BrotliEncoder.encodeDistance(distance, 0, 0, ring, distOut);
-        bits += distOut[2];
-        return bits * MILLIBITS;
+        long cmdPart;
+        if (cmdCost == null) {
+            cmdPart = (FLAT_COMMAND_BITS + packOut[3] + packOut[4])
+                    * (long) MILLIBITS;
+        } else {
+            cmdPart = cmdCost[packOut[0]]
+                    + packOut[3] * (long) MILLIBITS
+                    + packOut[4] * (long) MILLIBITS;
+        }
+        return cmdPart + distanceMillibits(distance, ring, distOut, distCostTbl);
     }
 
-    private static int[] buildLiteralCosts(byte[] block, int blockLen) {
-        int[] hist = new int[256];
-        for (int i = 0; i < blockLen; i++) {
-            hist[block[i] & 0xff]++;
+    private static long distanceMillibits(int distance, DistanceRing ring,
+            int[] distOut, int[] distCostTbl) throws BrotliException {
+        BrotliEncoder.encodeDistance(distance, 0, 0, ring, distOut);
+        if (distCostTbl == null) {
+            return distOut[2] * (long) MILLIBITS;
         }
-        int[] cost = new int[256];
-        for (int i = 0; i < 256; i++) {
-            int c = hist[i];
-            if (c <= 0) {
+        int code = distOut[0];
+        if (code < 0 || code >= distCostTbl.length) {
+            return distOut[2] * (long) MILLIBITS + 8L * MILLIBITS;
+        }
+        return distCostTbl[code] + distOut[2] * (long) MILLIBITS;
+    }
+
+    private static CostTables buildCostTables(byte[] block,
+            Lz77Encoder.Command[] commands, DistanceRing distRing)
+            throws BrotliException {
+        int[] litHist = new int[256];
+        int[] cmdHist = new int[704];
+        int[] distHist = new int[64];
+        int[] packOut = new int[5];
+        int[] distOut = new int[3];
+        int litTotal = 0;
+        int cmdTotal = 0;
+        int distTotal = 0;
+
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            for (int j = 0; j < cmd.insertLen; j++) {
+                litHist[block[cmd.insertOffset + j] & 0xff]++;
+                litTotal++;
+            }
+            int copyLen = cmd.copyLen;
+            if (copyLen < 2) {
+                copyLen = 2;
+            }
+            boolean insertOnly = cmd.distance == 0 && cmd.copyCovered == 0;
+            InsertCopyLengths.pack(cmd.insertLen, copyLen, insertOnly, packOut);
+            cmdHist[packOut[0]]++;
+            cmdTotal++;
+            if (!insertOnly && cmd.distance != 0) {
+                BrotliEncoder.encodeDistance(cmd.distance, 0, 0, distRing, distOut);
+                int code = distOut[0];
+                if (code >= distHist.length) {
+                    int[] grown = new int[code + 1];
+                    System.arraycopy(distHist, 0, grown, 0, distHist.length);
+                    distHist = grown;
+                }
+                distHist[code]++;
+                distTotal++;
+            }
+        }
+
+        return new CostTables(
+                histToMillibits(litHist, litTotal, 256),
+                histToMillibits(cmdHist, cmdTotal, 704),
+                histToMillibits(distHist, distTotal, distHist.length));
+    }
+
+    private static int[] histToMillibits(int[] hist, int total, int size) {
+        int[] cost = new int[size];
+        for (int i = 0; i < size; i++) {
+            int c = i < hist.length ? hist[i] : 0;
+            if (c <= 0 || total <= 0) {
                 cost[i] = 8 * MILLIBITS;
             } else {
-                // -log2(c/n) in millibits, floor 1 bit
-                double p = (double) c / (double) blockLen;
+                double p = (double) c / (double) total;
                 int mb = (int) Math.round(-Math.log(p) / Math.log(2.0) * MILLIBITS);
                 if (mb < MILLIBITS) {
                     mb = MILLIBITS;
@@ -187,6 +341,14 @@ final class ZopfliParser {
             }
         }
         return cost;
+    }
+
+    private static int[] buildLiteralCostsFromBlock(byte[] block, int blockLen) {
+        int[] hist = new int[256];
+        for (int i = 0; i < blockLen; i++) {
+            hist[block[i] & 0xff]++;
+        }
+        return histToMillibits(hist, blockLen, 256);
     }
 
     private static int findMatches(byte[] block, int pos, int blockLen,
@@ -248,10 +410,6 @@ final class ZopfliParser {
         return n;
     }
 
-    /**
-     * Keeps at most {@link #MAX_MATCHES} LZ matches, one per distance, longest
-     * length wins. Returns the new count.
-     */
     private static int upsertMatch(int n, int[] matchDist, int[] matchLen,
             int[] matchWire, boolean[] matchDict,
             int distance, int covered, int wireLen, boolean dictionary) {
@@ -271,7 +429,6 @@ final class ZopfliParser {
             matchDict[n] = dictionary;
             return n + 1;
         }
-        // Replace the shortest LZ match if this one is longer
         int worst = -1;
         int worstLen = Integer.MAX_VALUE;
         for (int i = 0; i < n; i++) {
@@ -289,10 +446,9 @@ final class ZopfliParser {
         return n;
     }
 
-    private static int traceCommands(int blockLen, int[] prev, int[] edgeLen,
+    private static void traceCommands(int blockLen, int[] prev, int[] edgeLen,
             int[] edgeDist, int[] edgeWire, boolean[] edgeDict,
             Lz77Encoder.Command[][] outCommands) {
-        // Collect edges from end to start
         int[] starts = new int[blockLen + 1];
         int[] lens = new int[blockLen + 1];
         int[] dists = new int[blockLen + 1];
@@ -314,7 +470,6 @@ final class ZopfliParser {
             at = from;
         }
 
-        // Reverse to forward order
         Lz77Encoder.Command[] cmds = new Lz77Encoder.Command[16];
         int cmdCount = 0;
         int litStart = 0;
@@ -323,10 +478,8 @@ final class ZopfliParser {
             int len = lens[e];
             int dist = dists[e];
             if (dist == 0 && len == 1) {
-                // literal — accumulate into next command's insert
                 continue;
             }
-            // Match: insert is literals from litStart to from
             Lz77Encoder.Command c = new Lz77Encoder.Command();
             c.insertOffset = litStart;
             c.insertLen = from - litStart;
@@ -353,7 +506,6 @@ final class ZopfliParser {
         Lz77Encoder.Command[] result = new Lz77Encoder.Command[cmdCount];
         System.arraycopy(cmds, 0, result, 0, cmdCount);
         outCommands[0] = result;
-        return cmdCount;
     }
 
     private static Lz77Encoder.Command[] append(Lz77Encoder.Command[] cmds,

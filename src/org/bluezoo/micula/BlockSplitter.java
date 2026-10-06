@@ -22,7 +22,7 @@
 package org.bluezoo.micula;
 
 /**
- * Bounded block splitting and literal-context clustering for quality 10.
+ * Bounded block splitting and literal-context clustering for qualities 10–11.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
