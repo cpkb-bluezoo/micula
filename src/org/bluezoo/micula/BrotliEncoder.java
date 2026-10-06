@@ -26,12 +26,13 @@ import java.nio.ByteBuffer;
 /**
  * Push-model Brotli encoder.
  *
- * <p>Quality 0 emits uncompressed metablocks. Qualities 1–9 use LZ77 with
+ * <p>Quality 0 emits uncompressed metablocks. Qualities 1–10 use LZ77 with
  * Huffman coding. Quality 2+ uses the static dictionary; 3+ deepens LZ search;
  * 4+ matches transformed dictionary words; 5+ uses literal context maps;
  * 6 adds a literal block split and distance context trees; 7 tunes
  * NPOSTFIX/NDIRECT; 8 uses up to four literal trees and an insert-and-copy
- * block split; 9 uses larger metablocks and a distance block split.
+ * block split; 9 uses larger metablocks and a distance block split; 10 uses
+ * Zopfli command selection with bounded block splits and context clustering.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -102,22 +103,33 @@ public final class BrotliEncoder {
     private final int[] blenHist = new int[26];
     private final int[] blenLens = new int[26];
     private final int[] blenCodes = new int[26];
-    private final int[] btypeHist = new int[4];
-    private final int[] btypeLens = new int[4];
-    private final int[] btypeCodes = new int[4];
-    private final int[] cmapL = new int[128];
-    private final int[] cmapD = new int[8];
+    private final int[] btypeHist = new int[10];
+    private final int[] btypeLens = new int[10];
+    private final int[] btypeCodes = new int[10];
+    private final int[] cmapL = new int[512];
+    private final int[] cmapD = new int[16];
     private final int[] litTreeOfContext = new int[64];
     private final int[] distScratch = new int[4096];
-    private final int[] iBtypeLens = new int[4];
-    private final int[] iBtypeCodes = new int[4];
+    private final int[] iBtypeLens = new int[10];
+    private final int[] iBtypeCodes = new int[10];
     private final int[] iBlenLens = new int[26];
     private final int[] iBlenCodes = new int[26];
-    private final int[] dBtypeLens = new int[4];
-    private final int[] dBtypeCodes = new int[4];
+    private final int[] dBtypeLens = new int[10];
+    private final int[] dBtypeCodes = new int[10];
     private final int[] dBlenLens = new int[26];
     private final int[] dBlenCodes = new int[26];
-    private final int[] distSlotToTree = new int[4];
+    private final int[] distSlotToTree = new int[8];
+    private final int[][] litHistsHq = new int[8][256];
+    private final int[][] litLensHq = new int[8][256];
+    private final int[][] litCodesHq = new int[8][256];
+    private final int[][] iacHistsHq = new int[4][704];
+    private final int[][] iacLensHq = new int[4][704];
+    private final int[][] iacCodesHq = new int[4][704];
+    private final int[][] distHistsHq = new int[8][MAX_DIST_ALPHABET];
+    private final int[][] distLensHq = new int[8][MAX_DIST_ALPHABET];
+    private final int[][] distCodesHq = new int[8][MAX_DIST_ALPHABET];
+    private final int[][] ctxHists = new int[512][256];
+    private final int[] ctxMapScratch = new int[512];
 
     private int[] iacCodes;
     private int[] insertExtras;
@@ -154,7 +166,7 @@ public final class BrotliEncoder {
     }
 
     /**
-     * Sets compression quality. Accepts 0..11 for API stability; only 0–9
+     * Sets compression quality. Accepts 0..11 for API stability; only 0–10
      * are implemented.
      *
      * @param quality compression quality
@@ -197,7 +209,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 9) {
+        if (quality > 10) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -238,7 +250,7 @@ public final class BrotliEncoder {
         if (finished) {
             throw new BrotliException("Encoder already finished");
         }
-        if (quality > 9) {
+        if (quality > 10) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         ensureHeader();
@@ -260,7 +272,7 @@ public final class BrotliEncoder {
             return;
         }
         ensureHeader();
-        if (quality > 9) {
+        if (quality > 10) {
             throw new BrotliException("Quality " + quality + " not implemented");
         }
         if (quality == 0) {
@@ -400,8 +412,13 @@ public final class BrotliEncoder {
         Lz77Encoder.MatchMode mode = Lz77Encoder.MatchMode.forQuality(quality);
 
         Lz77Encoder.Command[][] box = new Lz77Encoder.Command[1][];
-        Lz77Encoder.encode(pending, length, history, historyLen, windowSize,
-                mode, box);
+        if (mode.zopfli) {
+            ZopfliParser.encode(pending, length, history, historyLen, windowSize,
+                    distRing, box);
+        } else {
+            Lz77Encoder.encode(pending, length, history, historyLen, windowSize,
+                    mode, box);
+        }
         Lz77Encoder.Command[] commands = box[0];
 
         writeCompressedMetablock(pending, length, commands, last);
@@ -440,6 +457,10 @@ public final class BrotliEncoder {
 
     private void writeCompressedMetablock(byte[] data, int length,
             Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
+        if (quality >= 10) {
+            writeCompressedMetablockHq(data, length, commands, last);
+            return;
+        }
         if (quality >= 5) {
             writeCompressedMetablockContext(data, length, commands, last);
             return;
@@ -588,6 +609,465 @@ public final class BrotliEncoder {
                 bw.writeBits(distExtras[ci], distExtraBits[ci]);
             }
         }
+    }
+
+    private void writeCompressedMetablockHq(byte[] data, int length,
+            Lz77Encoder.Command[] commands, boolean last) throws BrotliException {
+        int totalLiterals = 0;
+        for (int ci = 0; ci < commands.length; ci++) {
+            totalLiterals += commands[ci].insertLen;
+        }
+
+        // --- Pass 1: pack commands / distances (postfix chosen as quality 7)
+        int[] chosen = choosePostfixPair(commands, length);
+        int npostfix = chosen[0];
+        int ndirect = chosen[1];
+        int distAlphabet = 16 + ndirect + (48 << npostfix);
+
+        ensureCmdWorkspace(commands.length);
+        for (int t = 0; t < 8; t++) {
+            clearHistogram(litHistsHq[t]);
+            clearHistogram(distHistsHq[t]);
+        }
+        for (int t = 0; t < 4; t++) {
+            clearHistogram(iacHistsHq[t]);
+        }
+
+        int p1 = 0;
+        int p2 = 0;
+        int pos = 0;
+        int bytesEmitted = 0;
+        int totalExplicitDist = 0;
+
+        // Flat literal stream for splitting
+        byte[] litStream = totalLiterals > 0 ? new byte[totalLiterals] : new byte[0];
+        int litAt = 0;
+
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            for (int j = 0; j < cmd.insertLen; j++) {
+                litStream[litAt++] = data[cmd.insertOffset + j];
+            }
+            bytesEmitted += cmd.insertLen;
+
+            boolean insertOnly = (cmd.distance == 0);
+            boolean skipDistance = bytesEmitted >= length;
+            boolean preferImplicit = insertOnly || skipDistance
+                    || (!cmd.dictionary && cmd.distance == distRing.get(0));
+            int copyLen = cmd.copyLen;
+            if (copyLen < 2) {
+                copyLen = 2;
+            }
+            InsertCopyLengths.pack(cmd.insertLen, copyLen, preferImplicit, packOut);
+            boolean implicitDist0 = packOut[0] < 128;
+            iacCodes[ci] = packOut[0];
+            insertExtras[ci] = packOut[1];
+            copyExtras[ci] = packOut[2];
+            insertExtraBits[ci] = packOut[3];
+            copyExtraBits[ci] = packOut[4];
+
+            writeDist[ci] = false;
+            distCopyLens[ci] = copyLen;
+            if (!skipDistance && !insertOnly) {
+                writeDist[ci] = !implicitDist0;
+                if (!implicitDist0) {
+                    encodeDistance(cmd.distance, npostfix, ndirect, distRing, distOut);
+                    distCodes[ci] = distOut[0];
+                    distExtras[ci] = distOut[1];
+                    distExtraBits[ci] = distOut[2];
+                    if (distCodes[ci] >= distAlphabet) {
+                        throw new BrotliException("Distance code out of alphabet");
+                    }
+                    totalExplicitDist++;
+                    if (!cmd.dictionary && distCodes[ci] != 0) {
+                        distRing.push(cmd.distance);
+                    }
+                }
+                for (int j = 0; j < cmd.copyCovered; j++) {
+                    pos++;
+                }
+                bytesEmitted += cmd.copyCovered;
+                if (bytesEmitted > length) {
+                    bytesEmitted = length;
+                }
+            } else {
+                // still advance context for inserts only — pos for inserts tracked via litStream
+            }
+        }
+
+        // Literal block lengths
+        int[] litBlockLens = splitByteStream(litStream, totalLiterals, 1024, 8, 256);
+        int nbltypesL = litBlockLens.length;
+
+        // IAC block lengths (chunks of 32 commands, alphabet = insert length code)
+        int[] iacBlockLens = splitCommands(commands, 32, 4);
+        int nbltypesI = iacBlockLens.length;
+
+        // Distance block lengths
+        int[] distBlockLens = splitDistances(totalExplicitDist, 32, 4);
+        int nbltypesD = distBlockLens.length;
+
+        // Assign IAC histograms by block
+        int cmdAt = 0;
+        for (int bt = 0; bt < nbltypesI; bt++) {
+            int end = cmdAt + iacBlockLens[bt];
+            for (int ci = cmdAt; ci < end && ci < commands.length; ci++) {
+                iacHistsHq[bt][iacCodes[ci]]++;
+            }
+            cmdAt = end;
+        }
+        for (int bt = 0; bt < nbltypesI; bt++) {
+            if (sum(iacHistsHq[bt]) == 0) {
+                iacHistsHq[bt][0] = 1;
+            }
+        }
+
+        // Context clustering: 64 contexts × nbltypesL, then cluster to 8 trees
+        int nCtxSlots = 64 * nbltypesL;
+        for (int i = 0; i < nCtxSlots; i++) {
+            clearHistogram(ctxHists[i]);
+        }
+        p1 = 0;
+        p2 = 0;
+        pos = 0;
+        int litIdx = 0;
+        int litBt = 0;
+        int litInBlock = 0;
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+            for (int j = 0; j < cmd.insertLen; j++) {
+                while (litBt < nbltypesL - 1 && litInBlock >= litBlockLens[litBt]) {
+                    litBt++;
+                    litInBlock = 0;
+                }
+                int lit = data[cmd.insertOffset + j] & 0xff;
+                int cid = Context.literalContextId(Context.UTF8, p1, p2);
+                ctxHists[64 * litBt + cid][lit]++;
+                p2 = p1;
+                p1 = lit;
+                litInBlock++;
+                pos++;
+            }
+            if (cmd.distance != 0 || cmd.copyCovered > 0) {
+                for (int j = 0; j < cmd.copyCovered; j++) {
+                    int b = data[pos] & 0xff;
+                    p2 = p1;
+                    p1 = b;
+                    pos++;
+                }
+            }
+        }
+
+        int ntreesL = BlockSplitter.clusterContexts(ctxHists, nCtxSlots, 8, ctxMapScratch);
+        // Copy clustered tree histograms into litHistsHq
+        for (int t = 0; t < ntreesL; t++) {
+            System.arraycopy(ctxHists[t], 0, litHistsHq[t], 0, 256);
+            if (sum(litHistsHq[t]) == 0) {
+                litHistsHq[t][0] = 1;
+            }
+        }
+        for (int bt = 0; bt < nbltypesL; bt++) {
+            for (int cid = 0; cid < 64; cid++) {
+                cmapL[64 * bt + cid] = ctxMapScratch[64 * bt + cid];
+            }
+        }
+
+        // Distance histograms by block × context
+        for (int t = 0; t < 8; t++) {
+            clearHistogram(distHistsHq[t]);
+        }
+        int distIdx = 0;
+        int distBt = 0;
+        int distInBlock = 0;
+        for (int ci = 0; ci < commands.length; ci++) {
+            if (!writeDist[ci]) {
+                continue;
+            }
+            while (distBt < nbltypesD - 1 && distInBlock >= distBlockLens[distBt]) {
+                distBt++;
+                distInBlock = 0;
+            }
+            int dcid = Context.distanceContextId(distCopyLens[ci]);
+            int ctx = dcid > 0 ? 1 : 0;
+            distHistsHq[distBt * 2 + ctx][distCodes[ci]]++;
+            distInBlock++;
+            distIdx++;
+        }
+        int maxDistSlots = nbltypesD * 2;
+        int ntreesD = 0;
+        for (int s = 0; s < maxDistSlots; s++) {
+            if (sumRange(distHistsHq[s], distAlphabet) > 0) {
+                distSlotToTree[s] = ntreesD;
+                if (ntreesD != s) {
+                    System.arraycopy(distHistsHq[s], 0, distHistsHq[ntreesD], 0,
+                            distAlphabet);
+                    clearHistogram(distHistsHq[s]);
+                }
+                ntreesD++;
+            } else {
+                distSlotToTree[s] = -1;
+            }
+        }
+        if (ntreesD == 0) {
+            distHistsHq[0][0] = 1;
+            ntreesD = 1;
+            distSlotToTree[0] = 0;
+        }
+        for (int bt = 0; bt < nbltypesD; bt++) {
+            for (int cid = 0; cid < 4; cid++) {
+                int slot = bt * 2 + (cid == 0 ? 0 : 1);
+                int t = distSlotToTree[slot];
+                cmapD[4 * bt + cid] = (t >= 0) ? t : 0;
+            }
+        }
+
+        // --- Header ---
+        bw.writeBits(last ? 1 : 0, 1);
+        if (last) {
+            bw.writeBits(0, 1);
+        }
+        writeMlen(length);
+        if (!last) {
+            bw.writeBits(0, 1);
+        }
+
+        writeBlockTypeGroupHeader(litBlockLens);
+        writeBlockTypeGroupHeader(iacBlockLens);
+        writeBlockTypeGroupHeader(distBlockLens);
+
+        bw.writeBits(npostfix, 2);
+        bw.writeBits(ndirect >> npostfix, 4);
+
+        for (int i = 0; i < nbltypesL; i++) {
+            bw.writeBits(Context.UTF8, 2);
+        }
+
+        if (ntreesL == 1) {
+            bw.writeBits(0, 1);
+        } else {
+            ContextMapWriter.writeVarLenUint8PlusOne(bw, ntreesL);
+            ContextMapWriter.write(bw, cmapL, 64 * nbltypesL, ntreesL);
+        }
+        if (ntreesD == 1) {
+            bw.writeBits(0, 1);
+        } else {
+            ContextMapWriter.writeVarLenUint8PlusOne(bw, ntreesD);
+            ContextMapWriter.write(bw, cmapD, 4 * nbltypesD, ntreesD);
+        }
+
+        for (int t = 0; t < ntreesL; t++) {
+            HuffmanEncoder.assignLengths(litHistsHq[t], litLensHq[t], 15);
+            HuffmanTable.buildEncodeTables(litLensHq[t], litCodesHq[t]);
+            HuffmanEncoder.writePrefixCode(bw, litHistsHq[t]);
+        }
+        for (int t = 0; t < nbltypesI; t++) {
+            HuffmanEncoder.assignLengths(iacHistsHq[t], iacLensHq[t], 15);
+            HuffmanTable.buildEncodeTables(iacLensHq[t], iacCodesHq[t]);
+            HuffmanEncoder.writePrefixCode(bw, iacHistsHq[t]);
+        }
+        for (int t = 0; t < ntreesD; t++) {
+            int[] histWrite = trimHist(distHistsHq[t], distAlphabet);
+            int[] lensWrite = new int[distAlphabet];
+            int[] codesWrite = new int[distAlphabet];
+            HuffmanEncoder.assignLengths(histWrite, lensWrite, 15);
+            HuffmanTable.buildEncodeTables(lensWrite, codesWrite);
+            HuffmanEncoder.writePrefixCode(bw, histWrite);
+            System.arraycopy(lensWrite, 0, distLensHq[t], 0, distAlphabet);
+            System.arraycopy(codesWrite, 0, distCodesHq[t], 0, distAlphabet);
+        }
+
+        // Rebuild switch tables into L / I / D dedicated arrays
+        rebuildSwitchTables(litBlockLens, btypeLens, btypeCodes, blenLens, blenCodes);
+        rebuildSwitchTables(iacBlockLens, iBtypeLens, iBtypeCodes, iBlenLens, iBlenCodes);
+        rebuildSwitchTables(distBlockLens, dBtypeLens, dBtypeCodes, dBlenLens, dBlenCodes);
+
+        // --- Commands ---
+        p1 = 0;
+        p2 = 0;
+        pos = 0;
+        litBt = 0;
+        litInBlock = 0;
+        int iacBt = 0;
+        int iacInBlock = 0;
+        distBt = 0;
+        distInBlock = 0;
+
+        for (int ci = 0; ci < commands.length; ci++) {
+            Lz77Encoder.Command cmd = commands[ci];
+
+            if (nbltypesI >= 2 && iacBt < nbltypesI - 1
+                    && iacInBlock >= iacBlockLens[iacBt]) {
+                int btLen = iBtypeLens[1];
+                if (btLen > 0) {
+                    bw.writePrefixBits(iBtypeCodes[1], btLen);
+                }
+                BlockLengthEncoder.write(bw, iacBlockLens[iacBt + 1],
+                        iBlenLens, iBlenCodes);
+                iacBt++;
+                iacInBlock = 0;
+            }
+
+            int code = iacCodes[ci];
+            int ilen = iacLensHq[iacBt][code];
+            if (ilen > 0) {
+                bw.writePrefixBits(iacCodesHq[iacBt][code], ilen);
+            }
+            bw.writeBits(insertExtras[ci], insertExtraBits[ci]);
+            bw.writeBits(copyExtras[ci], copyExtraBits[ci]);
+            iacInBlock++;
+
+            for (int j = 0; j < cmd.insertLen; j++) {
+                if (nbltypesL >= 2 && litBt < nbltypesL - 1
+                        && litInBlock >= litBlockLens[litBt]) {
+                    int btLen = btypeLens[1];
+                    if (btLen > 0) {
+                        bw.writePrefixBits(btypeCodes[1], btLen);
+                    }
+                    BlockLengthEncoder.write(bw, litBlockLens[litBt + 1],
+                            blenLens, blenCodes);
+                    litBt++;
+                    litInBlock = 0;
+                }
+                int lit = data[cmd.insertOffset + j] & 0xff;
+                int cid = Context.literalContextId(Context.UTF8, p1, p2);
+                int tree = cmapL[64 * litBt + cid];
+                int llen = litLensHq[tree][lit];
+                if (llen > 0) {
+                    bw.writePrefixBits(litCodesHq[tree][lit], llen);
+                }
+                p2 = p1;
+                p1 = lit;
+                litInBlock++;
+                pos++;
+            }
+
+            if (writeDist[ci]) {
+                if (nbltypesD >= 2 && distBt < nbltypesD - 1
+                        && distInBlock >= distBlockLens[distBt]) {
+                    int btLen = dBtypeLens[1];
+                    if (btLen > 0) {
+                        bw.writePrefixBits(dBtypeCodes[1], btLen);
+                    }
+                    BlockLengthEncoder.write(bw, distBlockLens[distBt + 1],
+                            dBlenLens, dBlenCodes);
+                    distBt++;
+                    distInBlock = 0;
+                }
+                int dc = distCodes[ci];
+                int dcid = Context.distanceContextId(distCopyLens[ci]);
+                int tree = cmapD[4 * distBt + dcid];
+                int dlen = distLensHq[tree][dc];
+                if (dlen > 0) {
+                    bw.writePrefixBits(distCodesHq[tree][dc], dlen);
+                }
+                bw.writeBits(distExtras[ci], distExtraBits[ci]);
+                distInBlock++;
+            }
+
+            if (cmd.distance != 0 || cmd.copyCovered > 0) {
+                for (int j = 0; j < cmd.copyCovered; j++) {
+                    int b = data[pos] & 0xff;
+                    p2 = p1;
+                    p1 = b;
+                    pos++;
+                }
+            }
+        }
+    }
+
+    private int[] splitByteStream(byte[] stream, int len, int chunkSize,
+            int maxTypes, int alphabet) {
+        if (len <= 0) {
+            return new int[] { 1 };
+        }
+        int nChunks = (len + chunkSize - 1) / chunkSize;
+        int[][] hists = new int[nChunks][alphabet];
+        int[] lens = new int[nChunks];
+        for (int i = 0; i < len; i++) {
+            int c = i / chunkSize;
+            hists[c][stream[i] & 0xff]++;
+            lens[c]++;
+        }
+        return BlockSplitter.mergeChunks(hists, lens, nChunks, alphabet, maxTypes);
+    }
+
+    private int[] splitCommands(Lz77Encoder.Command[] commands, int chunkSize,
+            int maxTypes) {
+        if (commands.length <= 0) {
+            return new int[] { 1 };
+        }
+        if (commands.length < 32) {
+            return new int[] { commands.length };
+        }
+        int nChunks = (commands.length + chunkSize - 1) / chunkSize;
+        int[][] hists = new int[nChunks][24];
+        int[] lens = new int[nChunks];
+        for (int i = 0; i < commands.length; i++) {
+            int c = i / chunkSize;
+            int code = InsertCopyLengths.insertLengthCode(commands[i].insertLen);
+            if (code < 0) {
+                code = 0;
+            }
+            if (code > 23) {
+                code = 23;
+            }
+            hists[c][code]++;
+            lens[c]++;
+        }
+        return BlockSplitter.mergeChunks(hists, lens, nChunks, 24, maxTypes);
+    }
+
+    private int[] splitDistances(int totalExplicit, int chunkSize, int maxTypes) {
+        if (totalExplicit <= 0) {
+            return new int[] { 1 };
+        }
+        if (totalExplicit < 32) {
+            return new int[] { totalExplicit };
+        }
+        int nChunks = (totalExplicit + chunkSize - 1) / chunkSize;
+        int[][] hists = new int[nChunks][16];
+        int[] lens = new int[nChunks];
+        int di = 0;
+        for (int ci = 0; ci < writeDist.length && di < totalExplicit; ci++) {
+            if (!writeDist[ci]) {
+                continue;
+            }
+            int c = di / chunkSize;
+            int bucket = distCodes[ci] & 15;
+            hists[c][bucket]++;
+            lens[c]++;
+            di++;
+        }
+        return BlockSplitter.mergeChunks(hists, lens, nChunks, 16, maxTypes);
+    }
+
+    private void rebuildSwitchTables(int[] blockLens, int[] outBtypeLens,
+            int[] outBtypeCodes, int[] outBlenLens, int[] outBlenCodes)
+            throws BrotliException {
+        if (blockLens.length < 2) {
+            return;
+        }
+        int alphabet = blockLens.length + 2;
+        int[] btHist = new int[alphabet];
+        btHist[1] = 1;
+        int[] btLens = new int[alphabet];
+        int[] btCodes = new int[alphabet];
+        HuffmanEncoder.assignLengths(btHist, btLens, 15);
+        HuffmanTable.buildEncodeTables(btLens, btCodes);
+        for (int i = 0; i < outBtypeLens.length; i++) {
+            outBtypeLens[i] = 0;
+            outBtypeCodes[i] = 0;
+        }
+        System.arraycopy(btLens, 0, outBtypeLens, 0, alphabet);
+        System.arraycopy(btCodes, 0, outBtypeCodes, 0, alphabet);
+
+        clearHistogram(blenHist);
+        for (int i = 0; i < blockLens.length; i++) {
+            BlockLengthEncoder.pack(blockLens[i], blenPack);
+            blenHist[blenPack[0]]++;
+        }
+        HuffmanEncoder.assignLengths(blenHist, outBlenLens, 15);
+        HuffmanTable.buildEncodeTables(outBlenLens, outBlenCodes);
     }
 
     private void writeCompressedMetablockContext(byte[] data, int length,
@@ -1094,23 +1574,40 @@ public final class BrotliEncoder {
             bw.writeBits(0, 1);
             return;
         }
-        ContextMapWriter.writeVarLenUint8PlusOne(bw, nbltypes);
-        clearHistogram(btypeHist);
-        btypeHist[1] = 1;
-        HuffmanEncoder.writePrefixCode(bw, btypeHist);
-        HuffmanEncoder.assignLengths(btypeHist, btypeLens, 15);
-        HuffmanTable.buildEncodeTables(btypeLens, btypeCodes);
+        writeBlockTypeGroupHeader(new int[] { firstLen, secondLen });
+    }
+
+    private void writeBlockTypeGroupHeader(int[] blockLens) throws BrotliException {
+        if (blockLens.length <= 1) {
+            bw.writeBits(0, 1);
+            return;
+        }
+        int alphabet = blockLens.length + 2;
+        ContextMapWriter.writeVarLenUint8PlusOne(bw, blockLens.length);
+        int[] btHist = new int[alphabet];
+        btHist[1] = 1;
+        HuffmanEncoder.writePrefixCode(bw, btHist);
+        int[] btLens = new int[alphabet];
+        int[] btCodes = new int[alphabet];
+        HuffmanEncoder.assignLengths(btHist, btLens, 15);
+        HuffmanTable.buildEncodeTables(btLens, btCodes);
+        for (int i = 0; i < btypeLens.length; i++) {
+            btypeLens[i] = 0;
+            btypeCodes[i] = 0;
+        }
+        System.arraycopy(btLens, 0, btypeLens, 0, alphabet);
+        System.arraycopy(btCodes, 0, btypeCodes, 0, alphabet);
 
         clearHistogram(blenHist);
-        BlockLengthEncoder.pack(firstLen, blenPack);
-        blenHist[blenPack[0]]++;
-        BlockLengthEncoder.pack(secondLen, blenPack);
-        blenHist[blenPack[0]]++;
+        for (int i = 0; i < blockLens.length; i++) {
+            BlockLengthEncoder.pack(blockLens[i], blenPack);
+            blenHist[blenPack[0]]++;
+        }
         HuffmanEncoder.writePrefixCode(bw, blenHist);
         HuffmanEncoder.assignLengths(blenHist, blenLens, 15);
         HuffmanTable.buildEncodeTables(blenLens, blenCodes);
 
-        BlockLengthEncoder.write(bw, firstLen, blenLens, blenCodes);
+        BlockLengthEncoder.write(bw, blockLens[0], blenLens, blenCodes);
     }
 
     private int[] choosePostfixPair(Lz77Encoder.Command[] commands, int length)
@@ -1187,7 +1684,7 @@ public final class BrotliEncoder {
      *
      * @param out {@code out[0]}=code, {@code out[1]}=extra, {@code out[2]}=extraBits
      */
-    private static void encodeDistance(int distance, DistanceRing ring, int[] out)
+    static void encodeDistance(int distance, DistanceRing ring, int[] out)
             throws BrotliException {
         encodeDistance(distance, 0, 0, ring, out);
     }
@@ -1197,7 +1694,7 @@ public final class BrotliEncoder {
      *
      * @param out {@code out[0]}=code, {@code out[1]}=extra, {@code out[2]}=extraBits
      */
-    private static void encodeDistance(int distance, int npostfix, int ndirect,
+    static void encodeDistance(int distance, int npostfix, int ndirect,
             DistanceRing ring, int[] out) throws BrotliException {
         if (distance <= 0) {
             throw new BrotliException("Invalid distance " + distance);

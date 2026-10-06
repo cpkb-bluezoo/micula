@@ -31,7 +31,7 @@ ant jmh -Djmh.args='MiculaEncodeBench -wi 3 -i 5'
 | `MiculaDecodeBench` | Decode with reused decoder (`FOX` vs `REPETITIVE` corpus) |
 | `MiculaDecodeChunkedBench` | Chunked `receive()` (1 / 64 / 8192) on `FOX` or `LITERAL_HEAVY` |
 | `MiculaDecodeContentEmitBench` | `contentEmitThreshold` 1 vs 4096 on `FOX` or `LITERAL_HEAVY` |
-| `MiculaEncodeBench` | Encode fox text, qualities 1–9 |
+| `MiculaEncodeBench` | Encode fox text, qualities 1–10 |
 
 Corpus files live under `test/junit/src/org/bluezoo/micula/`.
 

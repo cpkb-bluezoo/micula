@@ -44,11 +44,11 @@ public class GoogleBrotliInteropTest {
     }
 
     @Test
-    public void testMiculaEncodeGoogleDecodeQualities0Through9() throws Exception {
+    public void testMiculaEncodeGoogleDecodeQualities0Through10() throws Exception {
         List<byte[]> samples = samples();
         for (int i = 0; i < samples.size(); i++) {
             byte[] original = samples.get(i);
-            for (int quality = 0; quality <= 9; quality++) {
+            for (int quality = 0; quality <= 10; quality++) {
                 byte[] compressed = BrotliEncoderTest.encode(original, quality);
                 byte[] decoded = decodeWithGoogleBrotli(compressed);
                 assertArrayEquals(

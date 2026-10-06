@@ -22,11 +22,12 @@
 package org.bluezoo.micula;
 
 /**
- * LZ77 matcher producing insert/copy commands for qualities 1–4.
+ * LZ77 matcher producing insert/copy commands for qualities 1–9 (greedy) and
+ * quality 10 (Zopfli via {@link ZopfliParser}).
  *
  * <p>Qualities 1–2 use a single hash bucket (greedy). Qualities 3–4 walk a
  * short hash chain and apply one-step lazy matching. Quality 4 also searches
- * transformed dictionary words.
+ * transformed dictionary words. Qualities 5–9 reuse the quality-4 matcher.
  *
  * @author <a href="mailto:dog@gnu.org">Chris Burdess</a>
  */
@@ -44,30 +45,34 @@ final class Lz77Encoder {
         final boolean lazy;
         final boolean useDictionary;
         final boolean dictionaryTransforms;
+        final boolean zopfli;
 
         MatchMode(int chainDepth, boolean lazy, boolean useDictionary,
-                boolean dictionaryTransforms) {
+                boolean dictionaryTransforms, boolean zopfli) {
             this.chainDepth = chainDepth;
             this.lazy = lazy;
             this.useDictionary = useDictionary;
             this.dictionaryTransforms = dictionaryTransforms;
+            this.zopfli = zopfli;
         }
 
         static MatchMode forQuality(int quality) {
             switch (quality) {
                 case 1:
-                    return new MatchMode(1, false, false, false);
+                    return new MatchMode(1, false, false, false, false);
                 case 2:
-                    return new MatchMode(1, false, true, false);
+                    return new MatchMode(1, false, true, false, false);
                 case 3:
-                    return new MatchMode(4, true, true, false);
+                    return new MatchMode(4, true, true, false, false);
                 case 4:
                 case 5:
                 case 6:
                 case 7:
                 case 8:
                 case 9:
-                    return new MatchMode(16, true, true, true);
+                    return new MatchMode(16, true, true, true, false);
+                case 10:
+                    return new MatchMode(64, false, true, true, true);
                 default:
                     throw new IllegalArgumentException("LZ77 quality " + quality);
             }
