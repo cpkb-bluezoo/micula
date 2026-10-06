@@ -34,6 +34,10 @@
 #                               PUBLISHING_TYPE=USER_MANAGED to fall back to
 #                               reviewing and clicking Publish by hand at
 #                               central.sonatype.com)
+#   SKIP_CENTRAL             - if set to 1/true, skip the Central upload
+#                               (still builds and signs the bundle, then
+#                               publishes to GitHub Packages). Use to finish
+#                               Packages after a Central-only success.
 #
 # This script does not commit, tag, or push anything - it only builds
 # whatever is currently checked out and publishes it under the given
@@ -119,17 +123,23 @@ if [ -n "${KEEP_BUNDLE_AT:-}" ]; then
 fi
 
 echo "==> Uploading to Maven Central (publishingType=$PUBLISHING_TYPE)"
-TOKEN=$(printf '%s:%s' "$CENTRAL_TOKEN_USERNAME" "$CENTRAL_TOKEN_PASSWORD" | base64 | tr -d '\n')
-DEPLOYMENT_ID=$(curl --fail --request POST \
-    -H "Authorization: Bearer $TOKEN" \
-    --form bundle=@"$BUNDLE_ZIP" \
-    "https://central.sonatype.com/api/v1/publisher/upload?publishingType=$PUBLISHING_TYPE")
+SKIP_CENTRAL_NORMALIZED=$(printf '%s' "${SKIP_CENTRAL:-}" | tr '[:upper:]' '[:lower:]')
+if [ "$SKIP_CENTRAL_NORMALIZED" = "1" ] || [ "$SKIP_CENTRAL_NORMALIZED" = "true" ] \
+        || [ "$SKIP_CENTRAL_NORMALIZED" = "yes" ]; then
+    echo "==> Skipping Maven Central upload (SKIP_CENTRAL=$SKIP_CENTRAL)"
+else
+    TOKEN=$(printf '%s:%s' "$CENTRAL_TOKEN_USERNAME" "$CENTRAL_TOKEN_PASSWORD" | base64 | tr -d '\n')
+    DEPLOYMENT_ID=$(curl --fail --request POST \
+        -H "Authorization: Bearer $TOKEN" \
+        --form bundle=@"$BUNDLE_ZIP" \
+        "https://central.sonatype.com/api/v1/publisher/upload?publishingType=$PUBLISHING_TYPE")
 
-echo
-echo "==> Uploaded. Deployment ID: $DEPLOYMENT_ID"
-if [ "$PUBLISHING_TYPE" = "USER_MANAGED" ]; then
-    echo "This will NOT go live until you review and click Publish at:"
-    echo "  https://central.sonatype.com/publishing/deployments"
+    echo
+    echo "==> Uploaded. Deployment ID: $DEPLOYMENT_ID"
+    if [ "$PUBLISHING_TYPE" = "USER_MANAGED" ]; then
+        echo "This will NOT go live until you review and click Publish at:"
+        echo "  https://central.sonatype.com/publishing/deployments"
+    fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

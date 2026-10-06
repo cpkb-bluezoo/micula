@@ -13,11 +13,21 @@ name: Publish release
 # on the pipeline's version-mismatch guards and build having been proven
 # out already - set PUBLISHING_TYPE=USER_MANAGED here to fall back to
 # manual review at https://central.sonatype.com if ever needed.
+#
+# workflow_dispatch input skip_central: finish GitHub Packages after Central
+# already succeeded (delete the incomplete package version first if the jar
+# was partially uploaded).
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      skip_central:
+        description: 'Skip Maven Central upload (GitHub Packages only)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   publish:
@@ -68,6 +78,7 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           KEEP_BUNDLE_AT: ${{ github.workspace }}/central-bundle.zip
+          SKIP_CENTRAL: ${{ inputs.skip_central }}
 
       - name: Upload artifact for inspection
         uses: actions/upload-artifact@v7
