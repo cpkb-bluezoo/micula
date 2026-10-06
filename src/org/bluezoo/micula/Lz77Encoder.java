@@ -23,7 +23,7 @@ package org.bluezoo.micula;
 
 /**
  * LZ77 matcher producing insert/copy commands for qualities 1–9 (greedy) and
- * quality 10 (Zopfli via {@link ZopfliParser}).
+ * qualities 10–11 (Zopfli via {@link ZopfliParser}).
  *
  * <p>Qualities 1–2 use a single hash bucket (greedy). Qualities 3–4 walk a
  * short hash chain and apply one-step lazy matching. Quality 4 also searches
@@ -72,6 +72,7 @@ final class Lz77Encoder {
                 case 9:
                     return new MatchMode(16, true, true, true, false);
                 case 10:
+                case 11:
                     return new MatchMode(64, false, true, true, true);
                 default:
                     throw new IllegalArgumentException("LZ77 quality " + quality);
