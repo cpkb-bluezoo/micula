@@ -136,7 +136,6 @@ public final class BrotliDecoder {
     private int p2;
     private byte[] insertAccum;
     private int insertAccumLen;
-    private ByteBuffer insertView;
 
     private final class LocatorImpl implements BrotliLocator {
         @Override
@@ -314,7 +313,6 @@ public final class BrotliDecoder {
         distanceResolved = false;
         insertAccum = null;
         insertAccumLen = 0;
-        insertView = null;
     }
 
     private void process() throws BrotliException {
@@ -1321,13 +1319,6 @@ public final class BrotliDecoder {
 
     private void flushInsertEvent() throws BrotliException {
         if (needsCommands && insertAccum != null && insertAccumLen > 0) {
-            if (insertView == null) {
-                insertView = ByteBuffer.wrap(insertAccum, 0, insertAccumLen);
-            } else {
-                insertView.clear();
-                insertView.limit(insertAccumLen);
-            }
-            // wrap creates a new buffer each time for correct limit — safer:
             handler.insert(ByteBuffer.wrap(insertAccum, 0, insertAccumLen));
             insertAccumLen = 0;
         }

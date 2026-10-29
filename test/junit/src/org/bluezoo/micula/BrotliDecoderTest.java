@@ -252,6 +252,37 @@ public class BrotliDecoderTest {
         }
     }
 
+    /**
+     * Command events must be delivered for any valid stream. Mixed content
+     * makes insert lengths grow over the stream, which reallocates the
+     * decoder's insert buffer part-way through.
+     */
+    @Test
+    public void testCommandEventsWithGrowingInserts() throws Exception {
+        byte[] original = mixedContent(120000, 5);
+        int[] qualities = new int[] { 1, 5, 9 };
+        for (int q = 0; q < qualities.length; q++) {
+            CollectingSink sink = new CollectingSink();
+            BrotliEncoder enc = new BrotliEncoder(sink);
+            enc.setQuality(qualities[q]);
+            enc.receive(ByteBuffer.wrap(original));
+            enc.close();
+            byte[] compressed = sink.toByteArray();
+
+            CollectingHandler handler = new CollectingHandler();
+            handler.setNeedCommands(true);
+            BrotliDecoder decoder = new BrotliDecoder();
+            decoder.setHandler(handler);
+            decoder.setLimits(new BrotliLimits().disableAllLimits());
+            decoder.receive(ByteBuffer.wrap(compressed));
+            decoder.close();
+            assertArrayEquals("quality " + qualities[q], original,
+                handler.toByteArray());
+            assertTrue("quality " + qualities[q],
+                !handler.getCommands().isEmpty());
+        }
+    }
+
     /** Runs of text, random bytes and a small alphabet, deterministic by seed. */
     private static byte[] mixedContent(int length, long seed) {
         java.util.Random random = new java.util.Random(seed);
