@@ -432,6 +432,16 @@ public final class BrotliEncoder {
         pendingLen = remain;
     }
 
+    /**
+     * Returns the output byte {@code back} positions before the start of the
+     * metablock being written (1 is the last byte), or 0 at the start of the
+     * stream. Literal contexts are computed from the last two bytes of output
+     * and continue across metablock boundaries.
+     */
+    private int historyByte(int back) {
+        return back <= historyLen ? history[historyLen - back] & 0xff : 0;
+    }
+
     private void appendHistory(byte[] data, int length, int windowSize) {
         if (history.length < windowSize) {
             history = new byte[windowSize];
@@ -633,8 +643,8 @@ public final class BrotliEncoder {
             clearHistogram(iacHistsHq[t]);
         }
 
-        int p1 = 0;
-        int p2 = 0;
+        int p1 = historyByte(1);
+        int p2 = historyByte(2);
         int pos = 0;
         int bytesEmitted = 0;
         int totalExplicitDist = 0;
@@ -736,8 +746,8 @@ public final class BrotliEncoder {
         for (int i = 0; i < nCtxSlots; i++) {
             clearHistogram(ctxHists[i]);
         }
-        p1 = 0;
-        p2 = 0;
+        p1 = historyByte(1);
+        p2 = historyByte(2);
         pos = 0;
         int litIdx = 0;
         int litBt = 0;
@@ -892,8 +902,8 @@ public final class BrotliEncoder {
         rebuildSwitchTables(distBlockLens, dBtypeLens, dBtypeCodes, dBlenLens, dBlenCodes);
 
         // --- Commands ---
-        p1 = 0;
-        p2 = 0;
+        p1 = historyByte(1);
+        p2 = historyByte(2);
         pos = 0;
         litBt = 0;
         litInBlock = 0;
@@ -1150,8 +1160,8 @@ public final class BrotliEncoder {
         clearHistogram(distHist3);
         ensureCmdWorkspace(commands.length);
 
-        int p1 = 0;
-        int p2 = 0;
+        int p1 = historyByte(1);
+        int p2 = historyByte(2);
         int pos = 0;
         int litCount = 0;
         int bytesEmitted = 0;
@@ -1466,8 +1476,8 @@ public final class BrotliEncoder {
         }
 
         // --- Commands ---
-        p1 = 0;
-        p2 = 0;
+        p1 = historyByte(1);
+        p2 = historyByte(2);
         pos = 0;
         litCount = 0;
         boolean litSwitched = false;

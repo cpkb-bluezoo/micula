@@ -323,6 +323,49 @@ public class BrotliEncoderTest {
         }
     }
 
+    /**
+     * Literal contexts use the last two bytes of output, and those continue
+     * across metablock boundaries. Forcing a boundary every 2000 bytes makes
+     * the first literal of each metablock depend on the one before it.
+     */
+    @Test
+    public void testLiteralContextContinuesAcrossMetablocks() throws Exception {
+        byte[] original = wordText(40000, 11);
+        for (int quality = 1; quality <= 11; quality++) {
+            CollectingSink sink = new CollectingSink();
+            BrotliEncoder enc = new BrotliEncoder(sink);
+            enc.setQuality(quality);
+            for (int off = 0; off < original.length; off += 2000) {
+                int n = Math.min(2000, original.length - off);
+                enc.receive(ByteBuffer.wrap(original, off, n));
+                enc.flush();
+            }
+            enc.close();
+            assertArrayEquals("quality " + quality, original,
+                BrotliDecoderTest.decodeAll(sink.toByteArray()));
+        }
+    }
+
+    /** Pseudo-random words and numbers: mostly literals, few long copies. */
+    private static byte[] wordText(int length, long seed) {
+        String[] words = {
+            "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
+            "private", "static", "final", "int", "return", "buffer", "stream",
+            "decode", "encode", "block", "switch", "context", "literal",
+            "insert", "copy", "distance", "window"
+        };
+        java.util.Random random = new java.util.Random(seed);
+        StringBuilder sb = new StringBuilder();
+        while (sb.length() < length) {
+            sb.append(words[random.nextInt(words.length)]);
+            sb.append(random.nextInt(8) == 0 ? ".\n" : " ");
+            if (random.nextInt(30) == 0) {
+                sb.append(random.nextInt(100000));
+            }
+        }
+        return sb.substring(0, length).getBytes(StandardCharsets.UTF_8);
+    }
+
     static byte[] encode(byte[] original, int quality) throws BrotliException {
         CollectingSink sink = new CollectingSink();
         BrotliEncoder enc = new BrotliEncoder(sink);
