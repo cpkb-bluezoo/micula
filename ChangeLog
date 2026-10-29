@@ -1,6 +1,30 @@
 micula ChangeLog
 ================
 
+Version 1.1.1 (2026-10-29)
+--------------------------
+
+Security fix release for the decoder. Both issues affect malformed or
+truncated input only; well-formed streams decode exactly as before.
+
+### Fixed
+
+- Decoder no longer emits more content than a metablock's MLEN when an insert
+  length exceeds the bytes remaining in the metablock; such a command is now
+  rejected with a `BrotliException`, and `insertAccum` is no longer sized from
+  an unchecked insert length
+  ([#9](https://github.com/cpkb-bluezoo/micula/issues/9)).
+- Truncated input is no longer completed with zero bits. Reads and Huffman
+  decodes that need bits past the end of the supplied input now fail, so
+  `close()` throws on a stream that ends mid-symbol or mid-command instead of
+  delivering bytes that were not in the compressed input
+  ([#10](https://github.com/cpkb-bluezoo/micula/issues/10)).
+
+### Tests
+
+- Regression coverage for both issues, including rejection of every strict
+  prefix of valid streams produced at qualities 0, 1, 5, 9 and 11.
+
 Version 1.1.0 (2026-10-06)
 --------------------------
 
