@@ -318,6 +318,39 @@ public class BrotliDecoderTest {
         }
     }
 
+    /**
+     * Windows of 1 KiB and 2 KiB are smaller than the decoder's content batch,
+     * and a copy or uncompressed chunk can be longer than the whole window.
+     * Content must be emitted before the window overwrites it.
+     */
+    @Test
+    public void testSmallWindows() throws Exception {
+        byte[][] inputs = new byte[3][];
+        inputs[0] = mixedContent(60000, 5);
+        inputs[1] = new byte[50000]; // one long overlapping copy
+        inputs[2] = new byte[30000];
+        new java.util.Random(1).nextBytes(inputs[2]);
+        int[] qualities = new int[] { 0, 1, 3 };
+        for (int wbits = 10; wbits <= 11; wbits++) {
+            for (int i = 0; i < inputs.length; i++) {
+                for (int q = 0; q < qualities.length; q++) {
+                    CollectingSink sink = new CollectingSink();
+                    BrotliEncoder enc = new BrotliEncoder(sink);
+                    enc.setQuality(qualities[q]);
+                    enc.setWindowBits(wbits);
+                    enc.receive(ByteBuffer.wrap(inputs[i]));
+                    enc.close();
+                    byte[] compressed = sink.toByteArray();
+                    String label = "wbits " + wbits + " input " + i
+                        + " quality " + qualities[q];
+                    assertArrayEquals(label, inputs[i], decodeAll(compressed));
+                    assertArrayEquals(label + " chunked", inputs[i],
+                        decodeChunked(compressed, 7));
+                }
+            }
+        }
+    }
+
     /** Runs of text, random bytes and a small alphabet, deterministic by seed. */
     private static byte[] mixedContent(int length, long seed) {
         java.util.Random random = new java.util.Random(seed);

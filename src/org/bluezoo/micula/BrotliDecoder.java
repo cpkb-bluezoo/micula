@@ -69,6 +69,12 @@ public final class BrotliDecoder {
     private int contentEmitPending;
     private int contentEmitThreshold = DEFAULT_CONTENT_EMIT_THRESHOLD;
 
+    /**
+     * The threshold actually applied: never more than the ring holds, since
+     * pending literals are read back from the ring when they are emitted.
+     */
+    private int emitLimit = DEFAULT_CONTENT_EMIT_THRESHOLD;
+
     private BrotliHandler handler = new BrotliDefaultHandler();
     private BrotliLimits limits = new BrotliLimits();
     private boolean handlerBound;
@@ -196,6 +202,13 @@ public final class BrotliDecoder {
             throw new IllegalArgumentException("contentEmitThreshold must be >= 1");
         }
         this.contentEmitThreshold = bytes;
+        updateEmitLimit();
+    }
+
+    private void updateEmitLimit() {
+        emitLimit = (ring == null)
+            ? contentEmitThreshold
+            : Math.min(contentEmitThreshold, ring.getSize());
     }
 
     /**
@@ -249,6 +262,7 @@ public final class BrotliDecoder {
         wbits = 0;
         windowSize = 0;
         ring = null;
+        updateEmitLimit();
         metablockIndex = 0;
         isLast = false;
         isLastEmpty = false;
@@ -421,6 +435,7 @@ public final class BrotliDecoder {
         limits.checkWindowBits(wbits);
         windowSize = (1 << wbits) - 16;
         ring = new RingBuffer(wbits, false);
+        updateEmitLimit();
         handler.windowBits(wbits);
         state = DecoderState.METABLOCK_BEGIN;
         return true;
@@ -601,13 +616,18 @@ public final class BrotliDecoder {
             if (got == 0) {
                 return false;
             }
-            for (int i = 0; i < got; i++) {
-                byte b = uncompressedBuf[i];
-                p2 = p1;
-                p1 = b & 0xff;
-                ring.writeByte(b);
+            int done = 0;
+            while (done < got) {
+                int piece = Math.min(got - done, ring.getSize());
+                for (int i = done; i < done + piece; i++) {
+                    byte b = uncompressedBuf[i];
+                    p2 = p1;
+                    p1 = b & 0xff;
+                    ring.writeByte(b);
+                }
+                ring.emitContent(handler, piece);
+                done += piece;
             }
-            ring.emitContent(handler, got);
             uncompressedRead += got;
             metablockWritten += got;
             limits.checkTotalOutput(ring.getTotalWritten());
@@ -1188,7 +1208,7 @@ public final class BrotliDecoder {
         ring.writeByte(b);
         contentEmitPending++;
         if (literalsRemaining == 1
-                || contentEmitPending >= contentEmitThreshold) {
+                || contentEmitPending >= emitLimit) {
             flushContentEmit();
         }
         metablockWritten++;
@@ -1285,8 +1305,15 @@ public final class BrotliDecoder {
             if (distanceCode != 0) {
                 distRing.push(distance);
             }
-            ring.copyBackward(distance, copyLen);
-            ring.emitContent(handler, copyLen);
+            // A copy can be longer than the window, and content is read back
+            // from the ring, so copy and emit in pieces that fit in it
+            int left = copyLen;
+            while (left > 0) {
+                int piece = Math.min(left, ring.getSize());
+                ring.copyBackward(distance, piece);
+                ring.emitContent(handler, piece);
+                left -= piece;
+            }
             p1 = ring.recent(1) & 0xff;
             p2 = ring.recent(2) & 0xff;
             metablockWritten += copyLen;
