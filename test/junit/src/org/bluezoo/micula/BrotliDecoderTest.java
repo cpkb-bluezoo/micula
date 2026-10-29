@@ -227,6 +227,54 @@ public class BrotliDecoderTest {
     }
 
     /**
+     * A block-type switch whose block length is split across receive() calls
+     * must not apply the switch twice. Mixed content makes the encoder emit
+     * block switches, and one-byte chunks put a boundary inside every one.
+     */
+    @Test
+    public void testChunkInvarianceWithBlockSwitches() throws Exception {
+        byte[] original = mixedContent(120000, 9);
+        int[] qualities = new int[] { 5, 9 };
+        for (int q = 0; q < qualities.length; q++) {
+            CollectingSink sink = new CollectingSink();
+            BrotliEncoder enc = new BrotliEncoder(sink);
+            enc.setQuality(qualities[q]);
+            enc.receive(ByteBuffer.wrap(original));
+            enc.close();
+            byte[] compressed = sink.toByteArray();
+            assertArrayEquals("whole buffer, quality " + qualities[q],
+                original, decodeAll(compressed));
+            int[] sizes = new int[] { 1, 2, 7, 1000 };
+            for (int i = 0; i < sizes.length; i++) {
+                assertArrayEquals("quality " + qualities[q] + " chunk "
+                    + sizes[i], original, decodeChunked(compressed, sizes[i]));
+            }
+        }
+    }
+
+    /** Runs of text, random bytes and a small alphabet, deterministic by seed. */
+    private static byte[] mixedContent(int length, long seed) {
+        java.util.Random random = new java.util.Random(seed);
+        byte[] data = new byte[length];
+        String text = "the quick brown fox ";
+        int i = 0;
+        while (i < length) {
+            int kind = random.nextInt(3);
+            int run = 200 + random.nextInt(3000);
+            for (int j = 0; j < run && i < length; j++, i++) {
+                if (kind == 0) {
+                    data[i] = (byte) text.charAt(j % text.length());
+                } else if (kind == 1) {
+                    data[i] = (byte) random.nextInt(256);
+                } else {
+                    data[i] = (byte) ('a' + random.nextInt(4));
+                }
+            }
+        }
+        return data;
+    }
+
+    /**
      * Builds a one-metablock stream in which every prefix code has a single
      * symbol, so commands and literals consume no bits. Literals are 'A'.
      *

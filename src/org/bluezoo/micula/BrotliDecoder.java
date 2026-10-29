@@ -1124,14 +1124,15 @@ public final class BrotliDecoder {
                 throw new BrotliException("Block type out of range");
             }
         }
-        btypePrev[category] = btype[category];
-        btype[category] = newType;
-
         int len = readBlockLengthAfterMark(category);
         if (len < 0) {
             br.resetToMark();
             return false;
         }
+        // Commit the switch only once the whole field has been read, so a
+        // retry after underflow starts from the unchanged block-type state
+        btypePrev[category] = btype[category];
+        btype[category] = newType;
         blen[category] = len;
         br.clearMark();
         return true;
