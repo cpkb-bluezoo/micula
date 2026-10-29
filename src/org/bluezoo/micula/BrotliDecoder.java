@@ -230,6 +230,8 @@ public final class BrotliDecoder {
             return;
         }
         bindHandler();
+        // Bytes held back by the last receive() must be visible to the final pass
+        br.setInput(ByteBuffer.allocate(0));
         br.markEof();
         process();
         if (state != DecoderState.DONE) {

@@ -283,6 +283,41 @@ public class BrotliDecoderTest {
         }
     }
 
+    /**
+     * The reference encoder's quality-0 output for 100 bytes of 'a'. Its last
+     * symbol needs more lookahead than remains, so it can only be decoded once
+     * end of input is known. Bytes held back at that point must still be
+     * available to close(), whichever way the input was split.
+     */
+    @Test
+    public void testFinalBytesArrivingAlone() throws Exception {
+        byte[] compressed = new byte[] {
+            (byte) 0x8b, (byte) 0x31, (byte) 0x00, (byte) 0x00,
+            (byte) 0x20, (byte) 0xc2, (byte) 0xfe, (byte) 0xef,
+            (byte) 0xaa, (byte) 0x7f, (byte) 0xcf, (byte) 0xbd,
+            (byte) 0xd5, (byte) 0x3d, (byte) 0xa3, (byte) 0xba,
+            (byte) 0xbc, (byte) 0x8d, (byte) 0xe1, (byte) 0xae,
+            (byte) 0x78, (byte) 0xb1, (byte) 0xb0, (byte) 0xb0,
+            (byte) 0xb0, (byte) 0xb1, (byte) 0xb1, (byte) 0xaa,
+            (byte) 0x97, (byte) 0x19, (byte) 0xd5, (byte) 0xc1,
+            (byte) 0x87, (byte) 0x0f, (byte) 0x3f, (byte) 0x06,
+            (byte) 0x83, (byte) 0xc1, (byte) 0x38, (byte) 0xce,
+            (byte) 0x64, (byte) 0x55, (byte) 0x0d, (byte) 0x06,
+            (byte) 0x83, (byte) 0xc1, (byte) 0x60, (byte) 0x30,
+            (byte) 0x98, (byte) 0x43, (byte) 0x9d, (byte) 0x11,
+            (byte) 0xa9, (byte) 0x28, (byte) 0x8d, (byte) 0xc2,
+            (byte) 0x61, (byte) 0xa1, (byte) 0x9d, (byte) 0x64,
+            (byte) 0xef, (byte) 0x09, (byte) 0x7c, (byte) 0xf3,
+            (byte) 0xd8, (byte) 0x6e
+        };
+        byte[] expected = new byte[100];
+        java.util.Arrays.fill(expected, (byte) 'a');
+        for (int chunk = 1; chunk <= compressed.length; chunk++) {
+            assertArrayEquals("chunk " + chunk, expected,
+                decodeChunked(compressed, chunk));
+        }
+    }
+
     /** Runs of text, random bytes and a small alphabet, deterministic by seed. */
     private static byte[] mixedContent(int length, long seed) {
         java.util.Random random = new java.util.Random(seed);
