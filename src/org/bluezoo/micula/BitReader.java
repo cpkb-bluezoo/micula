@@ -196,19 +196,29 @@ final class BitReader {
     }
 
     /**
-     * Ensures at least {@code n} bits are available. Returns false on underflow
-     * when not at EOF. At EOF, zero-pads so Huffman peeks never run dry.
+     * Ensures at least {@code n} bits are available. Returns false if fewer
+     * than {@code n} bits can be supplied, whether the caller should wait for
+     * more input or (at EOF) the stream is truncated.
      */
     boolean ensureBits(int n) {
         while (bitCount < n) {
             if (!refillSafe()) {
-                if (eof) {
-                    return true;
-                }
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * Prepares a peek of up to {@code n} bits for a prefix code whose actual
+     * length may be shorter than {@code n}. Returns false only if the caller
+     * should wait for more input. At EOF it returns true even with fewer than
+     * {@code n} bits left; the bits above {@link #availableBits()} read as
+     * zero and the caller must check the code length it decoded against
+     * {@link #availableBits()} before consuming it.
+     */
+    boolean ensureBitsForPeek(int n) {
+        return ensureBits(n) || eof;
     }
 
     /**
@@ -252,6 +262,10 @@ final class BitReader {
     }
 
     void dropBits(int n) {
+        if (n > bitCount) {
+            throw new IllegalStateException(
+                "Dropping " + n + " bits with only " + bitCount + " available");
+        }
         accumulator >>>= n;
         bitCount -= n;
     }
@@ -273,10 +287,6 @@ final class BitReader {
         out[0] = (int) (accumulator & mask);
         accumulator >>>= n;
         bitCount -= n;
-        if (bitCount < 0) {
-            bitCount = 0;
-            accumulator = 0L;
-        }
         return true;
     }
 
@@ -319,6 +329,9 @@ final class BitReader {
      * After the last metablock, verify remaining bits in the accumulator are zero.
      */
     void verifyTrailingBitsZero() throws BrotliException {
+        if (bitCount < 0) {
+            throw new BrotliException("Unexpected end of bitstream");
+        }
         if (bitCount > 0) {
             long mask = (1L << bitCount) - 1L;
             if ((accumulator & mask) != 0L) {

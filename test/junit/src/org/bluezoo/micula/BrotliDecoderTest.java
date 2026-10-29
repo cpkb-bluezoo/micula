@@ -173,6 +173,60 @@ public class BrotliDecoderTest {
     }
 
     /**
+     * Missing input bits must not be decoded as zeros: dropping the final
+     * byte of a stream whose last field is a zero-valued symbol leaves the
+     * stream incomplete, so close() must fail.
+     */
+    @Test
+    public void testTruncatedStreamRejected() throws Exception {
+        byte[] compressed = singleSymbolMetablock(2, 16);
+        assertTrue(isRejected(compressed, compressed.length - 1));
+    }
+
+    /** Every strict prefix of a valid stream is an incomplete stream. */
+    @Test
+    public void testEveryTruncationRejected() throws Exception {
+        byte[] original = ("The quick brown fox jumps over the lazy dog. "
+            + "The quick brown fox jumps over the lazy dog again.\n")
+            .getBytes(StandardCharsets.UTF_8);
+        int[] qualities = new int[] { 0, 1, 5, 9, 11 };
+        for (int q = 0; q < qualities.length; q++) {
+            CollectingSink sink = new CollectingSink();
+            BrotliEncoder enc = new BrotliEncoder(sink);
+            enc.setQuality(qualities[q]);
+            enc.receive(ByteBuffer.wrap(original));
+            enc.close();
+            byte[] compressed = sink.toByteArray();
+            assertArrayEquals(original, decodeAll(compressed));
+            for (int len = 0; len < compressed.length; len++) {
+                assertTrue("quality " + qualities[q] + " prefix " + len,
+                    isRejected(compressed, len));
+            }
+        }
+    }
+
+    /**
+     * Decodes the first {@code len} bytes of {@code compressed}, expecting a
+     * BrotliException.
+     *
+     * @return true if the exception was thrown
+     */
+    private static boolean isRejected(byte[] compressed, int len) {
+        BrotliDecoder decoder = new BrotliDecoder();
+        decoder.setHandler(new CollectingHandler());
+        decoder.setLimits(new BrotliLimits().disableAllLimits());
+        try {
+            if (len > 0) {
+                decoder.receive(ByteBuffer.wrap(compressed, 0, len));
+            }
+            decoder.close();
+        } catch (BrotliException e) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * Builds a one-metablock stream in which every prefix code has a single
      * symbol, so commands and literals consume no bits. Literals are 'A'.
      *

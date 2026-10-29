@@ -149,11 +149,14 @@ final class PrefixCode {
         int numCodes = 0;
 
         for (int i = hskip; i < 18; i++) {
-            if (!br.ensureBits(4)) {
+            if (!br.ensureBitsForPeek(4)) {
                 return null;
             }
             int ix = br.peekBits(4);
             int len = CL_PREFIX_LENGTH[ix];
+            if (len > br.availableBits()) {
+                return null;
+            }
             int v = CL_PREFIX_VALUE[ix];
             br.dropBits(len);
             int sym = CODE_LENGTH_CODE_ORDER[i];

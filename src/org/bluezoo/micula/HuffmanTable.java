@@ -58,7 +58,7 @@ final class HuffmanTable {
         if (maxLength == 0) {
             return singleSymbol;
         }
-        if (!br.ensureBits(maxLength)) {
+        if (!br.ensureBitsForPeek(maxLength)) {
             return -2;
         }
         int peek = br.peekPrefixBits(maxLength);
@@ -66,6 +66,10 @@ final class HuffmanTable {
         int len = entry & 0xffff;
         if (len == 0) {
             return -1;
+        }
+        if (len > br.availableBits()) {
+            // only reachable at EOF: the code needs bits that were never supplied
+            return -2;
         }
         br.dropBits(len);
         return entry >>> 16;

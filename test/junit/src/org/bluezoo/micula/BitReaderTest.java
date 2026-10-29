@@ -102,4 +102,27 @@ public class BitReaderTest {
         assertTrue(br.tryReadBits(8, out));
         assertEquals(0xAA, out[0]);
     }
+
+    @Test
+    public void testEofDoesNotZeroPad() throws Exception {
+        BitReader br = new BitReader();
+        br.setInput(ByteBuffer.wrap(new byte[] { (byte) 0xAB }));
+        br.markEof();
+        int[] out = new int[1];
+        assertFalse(br.ensureBits(9));
+        assertFalse(br.tryReadBits(16, out));
+        // the failed read consumed nothing
+        assertTrue(br.tryReadBits(8, out));
+        assertEquals(0xAB, out[0]);
+        assertFalse(br.tryReadBits(1, out));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void testDropBitsBeyondAvailable() throws Exception {
+        BitReader br = new BitReader();
+        br.setInput(ByteBuffer.wrap(new byte[] { 0x00 }));
+        br.markEof();
+        assertTrue(br.ensureBits(8));
+        br.dropBits(9);
+    }
 }

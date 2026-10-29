@@ -88,4 +88,31 @@ public class HuffmanTableTest {
         assertEquals(0, t.tryDecode(br2));
         assertEquals(1, t.tryDecode(br2));
     }
+
+    /**
+     * At the end of input a code shorter than the table's maximum length may
+     * still decode, but only from bits that were actually supplied.
+     */
+    @Test
+    public void testDecodeNearEndOfInput() throws Exception {
+        int[] lengths = new int[] { 1, 2, 2 }; // 0, 10, 11
+        HuffmanTable t = HuffmanTable.fromLengths(lengths);
+
+        // 7 zero bits then a final 0 bit: the last symbol is the 1-bit code
+        BitReader br = new BitReader();
+        br.setInput(ByteBuffer.wrap(new byte[] { 0x00 }));
+        br.markEof();
+        int[] out = new int[1];
+        assertTrue(br.tryReadBits(7, out));
+        assertEquals(0, t.tryDecode(br));
+        // nothing left
+        assertEquals(-2, t.tryDecode(br));
+
+        // a final 1 bit needs a second bit that was never supplied
+        BitReader br2 = new BitReader();
+        br2.setInput(ByteBuffer.wrap(new byte[] { (byte) 0x80 }));
+        br2.markEof();
+        assertTrue(br2.tryReadBits(7, out));
+        assertEquals(-2, t.tryDecode(br2));
+    }
 }
