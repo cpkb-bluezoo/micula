@@ -142,6 +142,73 @@ public class BrotliDecoderTest {
         assertArrayEquals(original, decoded);
     }
 
+    /**
+     * An insert longer than the metablock must be rejected, not emitted in
+     * full: the handler was told MLEN=1 but the insert would produce 2 bytes.
+     */
+    @Test
+    public void testInsertLengthExceedsMlen() throws Exception {
+        byte[] compressed = singleSymbolMetablock(1, 16); // insert 2, copy 2
+        CollectingHandler handler = new CollectingHandler();
+        BrotliDecoder decoder = new BrotliDecoder();
+        decoder.setHandler(handler);
+        decoder.setLimits(new BrotliLimits().disableAllLimits());
+        try {
+            decoder.receive(ByteBuffer.wrap(compressed));
+            decoder.close();
+            fail("expected insert length to be rejected");
+        } catch (BrotliException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("MLEN"));
+        }
+        assertTrue("emitted past MLEN: " + handler.toByteArray().length,
+            handler.toByteArray().length <= 1);
+    }
+
+    /** An insert that exactly fills the metablock is valid. */
+    @Test
+    public void testInsertLengthEqualsMlen() throws Exception {
+        byte[] compressed = singleSymbolMetablock(2, 16); // insert 2, copy 2
+        byte[] decoded = decodeAll(compressed);
+        assertArrayEquals(new byte[] { 'A', 'A' }, decoded);
+    }
+
+    /**
+     * Builds a one-metablock stream in which every prefix code has a single
+     * symbol, so commands and literals consume no bits. Literals are 'A'.
+     *
+     * @param mlen the metablock length (1..65536)
+     * @param insertCopySymbol the sole insert-and-copy symbol
+     */
+    static byte[] singleSymbolMetablock(int mlen, int insertCopySymbol) {
+        long[] acc = new long[2]; // [0]=bit buffer, [1]=bit count
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        int[][] fields = {
+            { 0, 1 },                       // WBITS = 16
+            { 1, 1 }, { 0, 1 },             // ISLAST, not ISLASTEMPTY
+            { 0, 2 }, { mlen - 1, 16 },     // MNIBBLES = 4, MLEN - 1
+            { 0, 1 }, { 0, 1 }, { 0, 1 },   // NBLTYPESL/I/D = 1
+            { 0, 2 }, { 0, 4 },             // NPOSTFIX, NDIRECT
+            { 0, 2 },                       // literal context mode
+            { 0, 1 }, { 0, 1 },             // NTREESL, NTREESD = 1
+            { 1, 2 }, { 0, 2 }, { 'A', 8 },                   // literals
+            { 1, 2 }, { 0, 2 }, { insertCopySymbol, 10 },     // insert-and-copy
+            { 1, 2 }, { 0, 2 }, { 0, 6 },                     // distances
+        };
+        for (int i = 0; i < fields.length; i++) {
+            acc[0] |= ((long) fields[i][0]) << acc[1];
+            acc[1] += fields[i][1];
+            while (acc[1] >= 8) {
+                out.write((int) (acc[0] & 0xff));
+                acc[0] >>>= 8;
+                acc[1] -= 8;
+            }
+        }
+        if (acc[1] > 0) {
+            out.write((int) (acc[0] & 0xff));
+        }
+        return out.toByteArray();
+    }
+
     static byte[] encodeQuality0(byte[] original) throws BrotliException {
         return encodeQuality0WithWindow(original, 22);
     }

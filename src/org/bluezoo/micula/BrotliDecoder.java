@@ -1073,6 +1073,11 @@ public final class BrotliDecoder {
         int decodedCopy = InsertCopyLengths.COPY_BASE[copyCode] + tmpBits[0];
         br.clearMark();
 
+        // The literals of an insert must fit in the rest of the metablock
+        if (decodedInsert > mlen - metablockWritten) {
+            throw new BrotliException("Insert length exceeds remaining MLEN");
+        }
+
         insertLen = decodedInsert;
         copyLen = decodedCopy;
         implicitDistance0 = dist0;
