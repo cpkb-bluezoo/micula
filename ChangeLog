@@ -1,6 +1,52 @@
 micula ChangeLog
 ================
 
+Version 1.1.2 (2026-10-29)
+--------------------------
+
+Bug-fix release. It corrects encoder output at qualities 5 to 11 and several
+decoder faults found by testing against the reference `brotli` encoder and
+decoder. Upgrading is recommended for anyone using encoder qualities 5 and
+above. Streams written by earlier versions at those qualities may be invalid,
+or may decode to the wrong bytes (see below), and should be regenerated.
+Quality 0 to 4 output, the default quality 0 included, was not affected.
+
+### Fixed
+
+- Encoder, qualities 5 to 11: literal contexts were reset to zero at the start
+  of every metablock instead of continuing from the last two bytes of the
+  previous one. For input larger than one metablock (64 KiB by default) the
+  first literals of each later metablock were encoded under the wrong context.
+  Depending on the data, the stream decoded to the wrong bytes without any
+  error, or lost sync and failed with errors such as "Copy length exceeds
+  remaining MLEN" or "Invalid transform id". The reference decoder agreed with
+  Micula's on both outcomes
+  ([#15](https://github.com/cpkb-bluezoo/micula/issues/15),
+  [#16](https://github.com/cpkb-bluezoo/micula/issues/16)).
+- Decoder: a block-type switch whose block length was split across `receive()`
+  calls was applied twice, so valid streams with block switches could fail or
+  decode incorrectly depending on how the input was chunked
+  ([#11](https://github.com/cpkb-bluezoo/micula/issues/11)).
+- Decoder: with command events enabled (`needsCommands()`), valid streams whose
+  insert lengths grew part-way through failed with `IllegalArgumentException`
+  ([#12](https://github.com/cpkb-bluezoo/micula/issues/12)).
+- Decoder: `close()` ignored bytes held back by the last `receive()`, so a
+  valid stream whose final bytes arrived in a chunk of their own could fail
+  with "Unexpected end of Brotli stream"
+  ([#13](https://github.com/cpkb-bluezoo/micula/issues/13)).
+- Decoder: streams with a window of 1 KiB or 2 KiB (WBITS 10 and 11) failed
+  with `IllegalArgumentException` or could lose output, because content was
+  batched, or a copy or uncompressed chunk emitted, in runs longer than the
+  window. Windows of 4 KiB and above were unaffected
+  ([#14](https://github.com/cpkb-bluezoo/micula/issues/14)).
+
+### Tests
+
+- Regression coverage for each issue, including a round trip with a metablock
+  boundary forced every 2000 bytes at every quality, chunk-invariance on
+  streams with block switches, and decoding at one-byte chunk sizes of a
+  reference-encoded stream.
+
 Version 1.1.1 (2026-10-29)
 --------------------------
 
